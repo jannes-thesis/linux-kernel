@@ -69,6 +69,7 @@ struct rseq;
 union bpf_attr;
 struct io_uring_params;
 struct clone_args;
+struct tpool_data;
 
 #include <linux/types.h>
 #include <linux/aio_abi.h>
@@ -547,6 +548,9 @@ asmlinkage long sys_utimensat(int dfd, const char __user *filename,
 asmlinkage long sys_utimensat_time32(unsigned int dfd,
 				const char __user *filename,
 				struct old_timespec32 __user *t, int flags);
+
+asmlinkage long sys_tpool_register(pid_t pid);
+asmlinkage long sys_tpool_stats(struct tpool_data __user *data);
 
 /* kernel/acct.c */
 asmlinkage long sys_acct(const char __user *name);

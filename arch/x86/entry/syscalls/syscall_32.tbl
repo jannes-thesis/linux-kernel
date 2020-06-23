@@ -440,3 +440,5 @@
 433	i386	fspick			sys_fspick			__ia32_sys_fspick
 434	i386	pidfd_open		sys_pidfd_open			__ia32_sys_pidfd_open
 435	i386	clone3			sys_clone3			__ia32_sys_clone3
+436 i386    tpool_register  sys_tpool_register      __ia32_sys_tpool_register
+437 i386    tpool_stats     sys_tpool_stats         __ia32_sys_tpool_stats
