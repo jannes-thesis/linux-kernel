@@ -7,8 +7,13 @@
 
 struct tpool_data* global_data;
 
+/* struct work_container { */
+/*     struct work_struct work; */
+/*     struct tpool_data* tp_data; */
+/* }; */
+
 struct work_container {
-    struct work_struct work;
+    struct delayed_work work;
     struct tpool_data* tp_data;
 };
 
@@ -17,7 +22,9 @@ struct work_container* w_cont;
 static void work_handler(struct work_struct* work_arg) 
 {
     // get argument from container
-    struct work_container* work_cont = container_of(work_arg, struct work_container, work);
+    /* struct work_container* work_cont = container_of(work_arg, struct work_container, work); */
+    struct delayed_work* del_w = container_of(work_arg, struct delayed_work, work); 
+    struct work_container* work_cont = container_of(del_w, struct work_container, work);
     struct tpool_data* tp_data = work_cont->tp_data;
     
     struct task_struct* task;
@@ -41,8 +48,8 @@ static void work_handler(struct work_struct* work_arg)
     tp_data->read_bytes = target_task->ioac.read_bytes;
     tp_data->write_bytes = target_task->ioac.write_bytes;
 
-    /* printk( KERN_DEBUG "TPOOL-WORKER: reschedule self\n"); */
-    /* schedule_delayed_work(work_arg, 10 * HZ); */
+    printk( KERN_DEBUG "TPOOL-WORKER: reschedule self\n");
+    schedule_delayed_work(del_w, 10 * HZ);
 }
 
 SYSCALL_DEFINE1(tpool_register, pid_t, task_pid)
@@ -64,9 +71,11 @@ SYSCALL_DEFINE1(tpool_register, pid_t, task_pid)
     }
 
     // init work item and set argument to point to global tpool data
-    INIT_WORK(&w_cont->work, work_handler);
+    /* INIT_WORK(&w_cont->work, work_handler); */
+    INIT_DELAYED_WORK(&w_cont->work, work_handler);
     w_cont->tp_data = global_data;
-    schedule_work(&w_cont->work);
+    /* schedule_work(&w_cont->work); */
+    schedule_delayed_work(&w_cont->work, 0);
 
     return 0;
 }
