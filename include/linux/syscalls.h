@@ -550,7 +550,7 @@ asmlinkage long sys_utimensat_time32(unsigned int dfd,
 				struct old_timespec32 __user *t, int flags);
 
 asmlinkage long sys_tpool_register(pid_t __user *pids, __u32 amount);
-asmlinkage long sys_tpool_stats(struct tpool_data __user *data);
+asmlinkage long sys_tpool_stats(struct tpool_data __user *data, int traceset_id);
 
 /* kernel/acct.c */
 asmlinkage long sys_acct(const char __user *name);

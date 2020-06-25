@@ -1,4 +1,6 @@
-#include <linux/hashtable.h>
+#include <linux/highmem.h>
+#include <linux/list.h>
+#include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
@@ -6,133 +8,165 @@
 
 #include <uapi/linux/tpool.h>
 
-struct tpool_data* global_data;
+static void work_handler(struct work_struct* work_arg);
 
-struct target_node {
+/* ==== statically allocated global data ==== */
+/* traceset id -> traceset hashmap */
+DEFINE_IDR(tpool_module_map);
+/* wrapper for the worker function */
+DECLARE_DELAYED_WORK(update_work, work_handler);
+
+struct tpool_target {
     pid_t task_pid;
-    struct hlist_node list_node;
+    struct list_head list_node;
 };
 
-DEFINE_HASHTABLE(target_map, 5);
+// TODO: add tracer field
+struct tpool_traceset {
+    struct tpool_data* data;
+    struct list_head tracees;
+};
 
-static bool add_target(pid_t task_pid) 
+
+/*
+ * allocate traceset with empty tracee list
+ */
+static struct tpool_traceset* allocate_traceset(void) 
 {
-    struct target_node* new_target = kmalloc(sizeof(struct target_node), GFP_KERNEL);
+    struct page* data_page;
+    struct tpool_traceset* new_traceset = kmalloc(sizeof(struct tpool_traceset), GFP_KERNEL);
+    if (!new_traceset) {
+        return NULL;
+    }
+    data_page = alloc_page(GFP_KERNEL);
+    if (!data_page) {
+        printk( KERN_DEBUG "TPOOL: alloc data page failed\n");
+        return NULL;
+    }
+    new_traceset->data = kmap(data_page);
+    INIT_LIST_HEAD(&new_traceset->tracees);
+    return new_traceset;
+}
+
+static void free_traceset(struct tpool_traceset* traceset)
+{
+    return;
+}
+
+static bool add_target(pid_t task_pid, struct tpool_traceset* traceset) 
+{
+    struct tpool_target* new_target = kmalloc(sizeof(struct tpool_target), GFP_KERNEL);
     if (!new_target) {
         printk( KERN_DEBUG "TPOOL: kmalloc new target failed\n");
         return false;
     }
     new_target->task_pid = task_pid;
-    hash_add(target_map, &new_target->list_node, new_target->task_pid);
+    INIT_LIST_HEAD(&new_target->list_node);
+    list_add(&new_target->list_node, &traceset->tracees);
+    traceset->data->amount_current++;
     return true;
 }
 
-static bool is_target(pid_t task_pid)
+static void update_traceset_data(int id, struct tpool_traceset* traceset)
 {
-    struct target_node* current_node;
-    hash_for_each_possible(target_map, current_node, list_node, task_pid) {
-        if (current_node->task_pid == task_pid) {
-            return true;
+    struct tpool_data* tp_data = traceset->data;
+    struct list_head* tracees = &traceset->tracees;
+    struct tpool_target* target_cursor;
+    struct task_struct* task_cursor;
+    struct pid* pid_struct_cursor;
+
+    printk( KERN_DEBUG "TPOOL-WORKER: update traceset %d\n", id);
+    tp_data->read_bytes = 0;
+    tp_data->write_bytes = 0;
+    
+    list_for_each_entry(target_cursor, tracees, list_node) {
+        // TODO: NEEDS SYNCHRONIZATION FOR READING TASK STRUCT AFTER OBTAINING IT
+        pid_struct_cursor = find_get_pid(target_cursor->task_pid);
+        // in case pid struct is null pid_task will return null
+        task_cursor = pid_task(pid_struct_cursor, PIDTYPE_PID);
+        if (task_cursor == NULL) {
+            printk( KERN_DEBUG "TPOOL-WORKER: target task %d not found\n", target_cursor->task_pid);
+        }
+        else {
+            printk( KERN_DEBUG "TPOOL-WORKER: target task %d found\n", target_cursor->task_pid);
+            tp_data->read_bytes += task_cursor->ioac.read_bytes;
+            tp_data->write_bytes += task_cursor->ioac.write_bytes;
         }
     }
-    return false;
 }
 
-/* WORKQUEUE ITEM + HANDLER */
-struct work_container {
-    struct delayed_work work;
-    struct tpool_data* tp_data;
-};
-
-struct work_container* w_cont;
+static int __update_traceset_data(int id, void* traceset, void* unused)
+{
+    update_traceset_data(id, traceset);
+    return 0;
+}
 
 static void work_handler(struct work_struct* work_arg) 
 {
-    // get argument from container
-    /* struct work_container* work_cont = container_of(work_arg, struct work_container, work); */
-    struct delayed_work* del_w = container_of(work_arg, struct delayed_work, work); 
-    struct work_container* work_cont = container_of(del_w, struct work_container, work);
-    struct tpool_data* tp_data = work_cont->tp_data;
-    
-    struct task_struct* task;
-    int n_tasks = 0;
-    int n_found_targets = 0;
-
     printk( KERN_DEBUG "TPOOL-WORKER: start execution\n");
-
-    tp_data->read_bytes = 0;
-    tp_data->write_bytes = 0;
-    for_each_process(task) {
-        if (is_target(task->pid)) {
-            printk( KERN_DEBUG "TPOOL-WORKER: track target %d\n", task->pid);
-            tp_data->read_bytes += task->ioac.read_bytes;
-            tp_data->write_bytes += task->ioac.write_bytes;
-            n_found_targets++;
-        }
-        n_tasks++;
-    }
-    printk( KERN_DEBUG "TPOOL-WORKER: total amount of tasks: %d\n", n_tasks);
-    printk( KERN_DEBUG "TPOOL-WORKER: total amount of found targets: %d\n", n_found_targets);
-    printk( KERN_DEBUG "TPOOL-WORKER: reschedule self\n");
-    schedule_delayed_work(del_w, 10 * HZ);
+    idr_for_each(&tpool_module_map, __update_traceset_data, NULL);
+    schedule_delayed_work(&update_work, 10 * HZ);
 }
 
 /* SYSCALLS */
 SYSCALL_DEFINE2(tpool_register, pid_t __user *, task_pids, __u32, amount)
 {
-    u32 i;
+    __u32 i;
     unsigned long l;
-    hash_init(target_map);
+    int traceset_id;
+    struct tpool_traceset* new_traceset;
+    bool first_call = idr_is_empty(&tpool_module_map);
+
+    /* init traceset and id, insert in traceset map */
+    new_traceset = allocate_traceset();
+    if (!new_traceset) {
+        printk( KERN_DEBUG "TPOOL: could not allocate new traceset\n");
+        return -ENOMEM;
+    }
+    traceset_id = idr_alloc(&tpool_module_map, new_traceset, 0, 100, GFP_KERNEL);
+    if (traceset_id < 0) {
+        printk( KERN_DEBUG "TPOOL: could not insert new traceset in map\n");
+        free_traceset(new_traceset);
+        return traceset_id;
+    }
+    printk( KERN_DEBUG "TPOOL: inserted new traceset with id %d\n", traceset_id);
+    new_traceset->data->amount_targets = amount;
+    new_traceset->data->amount_current = 0;
+
     // copy pid array from user space
     l = sizeof(pid_t) * amount;
     pid_t* pids = kmalloc(l, GFP_KERNEL);
     printk( KERN_DEBUG "TPOOL: need to copy %lu bytes from user\n", l);
     l = copy_from_user(pids, task_pids, sizeof(pid_t) * amount);
     if (l != 0) {
+        // TODO: free traceset resources
         printk( KERN_DEBUG "TPOOL: could not copy data from user\n");
         printk( KERN_DEBUG "TPOOL: %lu bytes not copied\n", l);
         return -EFAULT;
     }
 
-    // allocate global tpool data
-    global_data = kzalloc(sizeof(struct tpool_data), GFP_KERNEL);
-    if (!global_data) {
-        printk( KERN_DEBUG "TPOOL: kmalloc global data failed\n");
-        return -ENOMEM;
-    }
-    global_data->amount_targets = amount;
-
-
-    // add targets to target map
+    // add targets to traceset
     for (i = 0; i < amount; i++) {
-        if (!add_target(pids[i])) {
+        if (!add_target(pids[i], new_traceset)) {
             printk( KERN_DEBUG "TPOOL: adding target to list failed\n");
         }
-        else {
-            global_data->amount_current++;
-        }
     }
 
-    // allocate container structure holding work item and argument
-    w_cont = kmalloc(sizeof(struct work_container), GFP_KERNEL);
-    if (!w_cont) {
-        printk( KERN_DEBUG "TPOOL: kmalloc work container failed\n");
-        kfree(global_data);
-        return -ENOMEM;
+    // if no tracesets registered yet, startup the background updater
+    if (first_call) {
+        work_handler(NULL);
     }
-
-    // init work item and set argument to point to global tpool data
-    INIT_DELAYED_WORK(&w_cont->work, work_handler);
-    w_cont->tp_data = global_data;
-    /* schedule_work(&w_cont->work); */
-    schedule_delayed_work(&w_cont->work, 0);
-
-    return 0;
+    return traceset_id;
 }
 
-SYSCALL_DEFINE1(tpool_stats, struct tpool_data __user *, data)
+SYSCALL_DEFINE2(tpool_stats, struct tpool_data __user *, data, int, traceset_id)
 {
-    if (copy_to_user(data, global_data, sizeof(struct tpool_data))) {
+    struct tpool_traceset* traceset = idr_find(&tpool_module_map, traceset_id);
+    if (!traceset) {
+        printk( KERN_DEBUG "TPOOL: could not find traceset with id %d\n", traceset_id);
+        return -EFAULT;
+    }
+    if (copy_to_user(data, traceset->data, sizeof(struct tpool_data))) {
         printk( KERN_DEBUG "TPOOL: could not copy data to user\n");
         return -EFAULT;
     }
