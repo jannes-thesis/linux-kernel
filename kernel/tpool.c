@@ -1,4 +1,4 @@
-#include <linux/list.h>
+#include <linux/hashtable.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
@@ -8,31 +8,29 @@
 
 struct tpool_data* global_data;
 
-/* TARGET LIST */
-struct target {
+struct target_node {
     pid_t task_pid;
-    struct list_head list;
+    struct hlist_node list_node;
 };
 
-static LIST_HEAD(target_list);
+DEFINE_HASHTABLE(target_map, 5);
 
 static bool add_target(pid_t task_pid) 
 {
-    struct target* new_target = kmalloc(sizeof(struct target), GFP_KERNEL);
+    struct target_node* new_target = kmalloc(sizeof(struct target_node), GFP_KERNEL);
     if (!new_target) {
         printk( KERN_DEBUG "TPOOL: kmalloc new target failed\n");
         return false;
     }
     new_target->task_pid = task_pid;
-    INIT_LIST_HEAD(&new_target->list);
-    list_add(&new_target->list, &target_list);
+    hash_add(target_map, &new_target->list_node, new_target->task_pid);
     return true;
 }
 
 static bool is_target(pid_t task_pid)
 {
-    struct target* current_node;
-    list_for_each_entry(current_node, &target_list, list) {
+    struct target_node* current_node;
+    hash_for_each_possible(target_map, current_node, list_node, task_pid) {
         if (current_node->task_pid == task_pid) {
             return true;
         }
@@ -84,6 +82,7 @@ SYSCALL_DEFINE2(tpool_register, pid_t __user *, task_pids, __u32, amount)
 {
     u32 i;
     unsigned long l;
+    hash_init(target_map);
     // copy pid array from user space
     l = sizeof(pid_t) * amount;
     pid_t* pids = kmalloc(l, GFP_KERNEL);
@@ -104,7 +103,7 @@ SYSCALL_DEFINE2(tpool_register, pid_t __user *, task_pids, __u32, amount)
     global_data->amount_targets = amount;
 
 
-    // add targets to target list
+    // add targets to target map
     for (i = 0; i < amount; i++) {
         if (!add_target(pids[i])) {
             printk( KERN_DEBUG "TPOOL: adding target to list failed\n");
@@ -133,29 +132,6 @@ SYSCALL_DEFINE2(tpool_register, pid_t __user *, task_pids, __u32, amount)
 
 SYSCALL_DEFINE1(tpool_stats, struct tpool_data __user *, data)
 {
-    /* struct task_struct* target_task; */
-    /* struct task_struct* task; */
-    /* int n_tasks = 0; */
-    /* if (!global_data) { */
-    /*     printk( KERN_DEBUG "TPOOL: global data not allocated\n"); */
-    /*     return -EINVAL; */
-    /* } */
-
-    /* for_each_process(task) { */
-    /*     if (task->pid == global_data->task_pid) { */
-    /*         target_task = task; */
-    /*     } */
-    /*     n_tasks++; */
-    /* } */
-    /* printk( KERN_DEBUG "TPOOL: total amount of tasks: %d\n", n_tasks); */
-
-    /* if (!target_task) { */
-    /*     printk( KERN_DEBUG "TPOOL: target task not found\n"); */
-    /*     return -EINVAL; */
-    /* } */
-    /* global_data->read_bytes = target_task->ioac.read_bytes; */
-    /* global_data->write_bytes = target_task->ioac.write_bytes; */
-
     if (copy_to_user(data, global_data, sizeof(struct tpool_data))) {
         printk( KERN_DEBUG "TPOOL: could not copy data to user\n");
         return -EFAULT;
