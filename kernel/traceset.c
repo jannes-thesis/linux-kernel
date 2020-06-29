@@ -89,6 +89,24 @@ static bool add_target(pid_t task_pid, struct tpool_traceset* traceset)
     return true;
 }
 
+static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
+{
+    struct tpool_target* target_current;
+    struct tpool_target* target_next;
+    bool ret = false;
+    printk( KERN_DEBUG "TPOOL: remove target: %d\n", task_pid);
+    list_for_each_entry_safe(target_current, target_next, &traceset->tracees, list_node) {
+        if (target_current->task_pid == task_pid) {
+            printk( KERN_DEBUG "TPOOL: found target to be removed: %d\n", task_pid);
+            list_del(&target_current->list_node);
+            kfree(target_current);
+            traceset->data->amount_current--;
+            ret = true;
+        }
+    }
+    return ret;
+}
+
 static void update_traceset_data(int id, struct tpool_traceset* traceset)
 {
     struct traceset_data* tp_data = traceset->data;
@@ -111,8 +129,9 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
     tp_data->write_bytes = 0;
     
     list_for_each_entry(target_cursor, tracees, list_node) {
-        // TODO: NEEDS SYNCHRONIZATION FOR READING TASK STRUCT AFTER OBTAINING IT
         pid_struct_cursor = find_get_pid(target_cursor->task_pid);
+        // TODO: NEEDS SYNCHRONIZATION FOR READING TASK STRUCT AFTER OBTAINING IT
+	    /* rcu_read_lock(); */
         // in case pid struct is null pid_task will return null
         task_cursor = pid_task(pid_struct_cursor, PIDTYPE_PID);
         if (task_cursor == NULL) {
@@ -123,6 +142,7 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
             tp_data->read_bytes += task_cursor->ioac.read_bytes;
             tp_data->write_bytes += task_cursor->ioac.write_bytes;
         }
+	    /* rcu_read_unlock(); */
     }
 }
 
@@ -215,6 +235,8 @@ static int get_traceset_data_fd(struct traceset_data* tdata)
  *
  * return a file descriptor associated with traceset data,
  * needs to be mmapped in user space 
+ *
+ * if registering targets for existing set, return 0
  */
 SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, int, amount)
 {
@@ -270,10 +292,15 @@ SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, 
         }
     }
 
-    fd = get_traceset_data_fd(traceset->data);
-    if (fd < 0) {
-        kfree(tracee_pids);
-        goto err;
+    if (is_new) {
+        fd = get_traceset_data_fd(traceset->data);
+        if (fd < 0) {
+            kfree(tracee_pids);
+            goto err;
+        }
+    }
+    else {
+        fd = 0;
     }
 
     // if worker was inactive, perform one traceset update and schedule worker
@@ -298,10 +325,47 @@ err:
 /*
  * deregister a set of processes from tracing for given traceset
  * if negative amount is passed, then whole traceset will be deregistered and is invalid after
+ *
+ * return the amount of deregistered targets
+ * guarantees that all passed deregister targets are not traced anymore
  */
 SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids, int, amount)
 {
-    printk( KERN_DEBUG "TPOOL: not implemented\n");
+    struct tpool_traceset* traceset;
+    int i;
+    int deregister_amount = 0;
+    pid_t* tracee_pids;
+    spin_lock(&traceset_module_lock);
+    traceset = idr_find(&tpool_module_map, traceset_id);
+    if (!traceset) {
+        printk( KERN_DEBUG "TPOOL: could not find traceset with id %d\n", traceset_id);
+        goto err;
+    }
+    if (amount <= 0) {
+        deregister_amount = traceset->data->amount_current;
+        idr_remove(&tpool_module_map, traceset_id);
+        free_traceset(traceset);
+    }
+    else {
+        // copy pid array from user space
+        tracee_pids = copy_alloc_target_pids(task_pids, amount);
+        if (!tracee_pids) {
+            goto err;
+        }
+        // remove targets from traceset
+        for (i = 0; i < amount; i++) {
+            if (!remove_target(tracee_pids[i], traceset)) {
+                printk( KERN_DEBUG "TPOOL: removing target %d failed\n", tracee_pids[i]);
+            }
+            else {
+                deregister_amount++;
+            }
+        }
+    }
+    spin_unlock(&traceset_module_lock);
+    return deregister_amount;
+err:
+    spin_unlock(&traceset_module_lock);
     return -EFAULT;
 }
 
