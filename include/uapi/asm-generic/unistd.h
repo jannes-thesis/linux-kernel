@@ -850,10 +850,10 @@ __SYSCALL(__NR_pidfd_open, sys_pidfd_open)
 #define __NR_clone3 435
 __SYSCALL(__NR_clone3, sys_clone3)
 #endif
-#define __NR_pidfd_open 436
-__SYSCALL(__NR_tpool_register, sys_tpool_register)
-#define __NR_pidfd_open 437
-__SYSCALL(__NR_tpool_stats, sys_tpool_stats)
+#define __NR_traceset_register 436
+__SYSCALL(__NR_traceset_register, sys_traceset_register)
+#define __NR_traceset_deregister 437
+__SYSCALL(__NR_traceset_deregister, sys_traceset_deregister)
 
 #undef __NR_syscalls
 #define __NR_syscalls 438

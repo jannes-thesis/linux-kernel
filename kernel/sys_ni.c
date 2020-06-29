@@ -51,8 +51,8 @@ COND_SYSCALL_COMPAT(io_pgetevents);
 COND_SYSCALL(io_uring_setup);
 COND_SYSCALL(io_uring_enter);
 COND_SYSCALL(io_uring_register);
-COND_SYSCALL(tpool_register);
-COND_SYSCALL(tpool_stats);
+COND_SYSCALL(traceset_register);
+COND_SYSCALL(traceset_deregister);
 
 /* fs/xattr.c */
 

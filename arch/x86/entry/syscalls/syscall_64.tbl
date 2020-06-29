@@ -357,8 +357,8 @@
 433	common	fspick			__x64_sys_fspick
 434	common	pidfd_open		__x64_sys_pidfd_open
 435	common	clone3			__x64_sys_clone3/ptregs
-436 common  tpool_register  __x64_sys_tpool_register
-437 common  tpool_stats     __x64_sys_tpool_stats
+436 common  traceset_register       __x64_sys_traceset_register
+437 common  traceset_deregister     __x64_sys_traceset_deregister
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact
