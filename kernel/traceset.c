@@ -6,6 +6,7 @@
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/syscalls.h>
 #include <linux/workqueue.h>
 
@@ -16,6 +17,10 @@ static void work_handler(struct work_struct* work_arg);
 /* ==== statically allocated global data ==== */
 /* traceset id -> traceset hashmap */
 DEFINE_IDR(tpool_module_map);
+/* whether update work is scheduled or not */
+bool worker_active = false;
+/* spinlock for traceset map and active worker var */
+DEFINE_SPINLOCK(traceset_module_lock);
 /* wrapper for the worker function */
 DECLARE_DELAYED_WORK(update_work, work_handler);
 
@@ -130,9 +135,16 @@ static int __update_traceset_data(int id, void* traceset, void* unused)
 static void work_handler(struct work_struct* work_arg) 
 {
     printk( KERN_DEBUG "TPOOL-WORKER: start execution\n");
-    // TODO: stop worker if 0 tracesets, need synchronized variable to indicate non-active worker
-    idr_for_each(&tpool_module_map, __update_traceset_data, NULL);
-    schedule_delayed_work(&update_work, 10 * HZ);
+    spin_lock(&traceset_module_lock);
+    if (idr_is_empty(&tpool_module_map)) {
+        printk( KERN_DEBUG "TPOOL-WORKER: 0 tracesets registered, stopping\n");
+        worker_active = false;
+    }
+    else {
+        idr_for_each(&tpool_module_map, __update_traceset_data, NULL);
+        schedule_delayed_work(&update_work, 10 * HZ);
+    }
+    spin_unlock(&traceset_module_lock);
 }
 
 /* SYSCALL HELPERS */
@@ -210,22 +222,24 @@ SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, 
     int fd;
     struct tpool_traceset* traceset;
     pid_t* tracee_pids;
-    bool first_call = idr_is_empty(&tpool_module_map);
     bool is_new;
 
 
+    spin_lock(&traceset_module_lock);
     if (traceset_id < 0) {
         is_new = true;
         /* init traceset and id, insert in traceset map */
         traceset = allocate_traceset();
         if (!traceset) {
             printk( KERN_DEBUG "TPOOL: could not allocate new traceset\n");
+            spin_unlock(&traceset_module_lock);
             return -ENOMEM;
         }
         traceset_id = idr_alloc(&tpool_module_map, traceset, 0, 100, GFP_KERNEL);
         if (traceset_id < 0) {
             printk( KERN_DEBUG "TPOOL: could not insert new traceset in map\n");
             free_traceset(traceset);
+            spin_unlock(&traceset_module_lock);
             return -EFAULT;
         }
         printk( KERN_DEBUG "TPOOL: inserted new traceset with id %d\n", traceset_id);
@@ -239,7 +253,7 @@ SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, 
         traceset = idr_find(&tpool_module_map, traceset_id);
         if (!traceset) {
             printk( KERN_DEBUG "TPOOL: could not find traceset with id %d\n", traceset_id);
-            return -EFAULT;
+            goto err;
         }
     }
 
@@ -258,20 +272,25 @@ SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, 
 
     fd = get_traceset_data_fd(traceset->data);
     if (fd < 0) {
+        kfree(tracee_pids);
         goto err;
     }
 
-    // if no tracesets registered yet, startup the background updater
-    if (first_call) {
-        work_handler(NULL);
+    // if worker was inactive, perform one traceset update and schedule worker
+    if (!worker_active) {
+        worker_active = true;
+        idr_for_each(&tpool_module_map, __update_traceset_data, NULL);
+        schedule_delayed_work(&update_work, 10 * HZ);
     }
 
+    spin_unlock(&traceset_module_lock);
     return fd;
 err:
     if (is_new) {
         idr_remove(&tpool_module_map, traceset_id);
         free_traceset(traceset);
     }
+    spin_unlock(&traceset_module_lock);
     return -EFAULT;
 
 }
