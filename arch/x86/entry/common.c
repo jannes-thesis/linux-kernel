@@ -26,6 +26,7 @@
 #include <linux/livepatch.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
+#include <linux/delayacct.h>
 
 #include <asm/desc.h>
 #include <asm/traps.h>
@@ -278,6 +279,7 @@ __visible inline void syscall_return_slowpath(struct pt_regs *regs)
 __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 {
 	struct thread_info *ti;
+    u64 start;
 
 	enter_from_user_mode();
 	local_irq_enable();
@@ -293,7 +295,9 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 	nr &= __SYSCALL_MASK;
 	if (likely(nr < NR_syscalls)) {
 		nr = array_index_nospec(nr, NR_syscalls);
+        start = ktime_get_ns();
 		regs->ax = sys_call_table[nr](regs);
+        current->delays->syscalls_delay += ktime_get_ns() - start;
 	}
 
 	syscall_return_slowpath(regs);

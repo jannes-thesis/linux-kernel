@@ -53,6 +53,8 @@ struct task_delay_info {
 
 	u32 freepages_count;	/* total count of memory reclaim */
 	u32 thrashing_count;	/* total count of thrash waits */
+
+    u64 syscalls_delay;     /* total time spent in all system call handlers */
 };
 #endif
 

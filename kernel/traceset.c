@@ -10,6 +10,8 @@
 #include <linux/syscalls.h>
 #include <linux/workqueue.h>
 
+#include <linux/delayacct.h>
+
 #include <uapi/linux/traceset.h>
 
 static void work_handler(struct work_struct* work_arg);
@@ -143,6 +145,8 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
             tp_data->write_bytes += task_cursor->ioac.write_bytes;
 	        rcu_read_unlock();
             printk( KERN_DEBUG "TPOOL-WORKER: target task %d found\n", target_cursor->task_pid);
+            printk( KERN_DEBUG "TPOOL-WORKER: task %d syscall time in ns: %llu \n", 
+                    target_cursor->task_pid, task_cursor->delays->syscalls_delay);
         }
     }
 }
