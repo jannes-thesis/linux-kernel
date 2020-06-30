@@ -130,19 +130,20 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
     
     list_for_each_entry(target_cursor, tracees, list_node) {
         pid_struct_cursor = find_get_pid(target_cursor->task_pid);
-        // TODO: NEEDS SYNCHRONIZATION FOR READING TASK STRUCT AFTER OBTAINING IT
-	    /* rcu_read_lock(); */
+        // need to read task fields in RCU critical section to avoid task_struct to become invalid
+	    rcu_read_lock();
         // in case pid struct is null pid_task will return null
         task_cursor = pid_task(pid_struct_cursor, PIDTYPE_PID);
         if (task_cursor == NULL) {
+	        rcu_read_unlock();
             printk( KERN_DEBUG "TPOOL-WORKER: target task %d not found\n", target_cursor->task_pid);
         }
         else {
-            printk( KERN_DEBUG "TPOOL-WORKER: target task %d found\n", target_cursor->task_pid);
             tp_data->read_bytes += task_cursor->ioac.read_bytes;
             tp_data->write_bytes += task_cursor->ioac.write_bytes;
+	        rcu_read_unlock();
+            printk( KERN_DEBUG "TPOOL-WORKER: target task %d found\n", target_cursor->task_pid);
         }
-	    /* rcu_read_unlock(); */
     }
 }
 
@@ -171,8 +172,7 @@ static void work_handler(struct work_struct* work_arg)
 
 static int shared_data_mmap(struct file *file, struct vm_area_struct *vma)
 {
-    /* struct example_data* datap = file->private_data; */
-    int* datap = file->private_data;
+    void* datap = file->private_data;
 	unsigned long pfn = virt_to_phys(datap) >> PAGE_SHIFT;
 	unsigned long len = vma->vm_end - vma->vm_start;
 	return remap_pfn_range(vma, vma->vm_start, pfn, len, vma->vm_page_prot);
