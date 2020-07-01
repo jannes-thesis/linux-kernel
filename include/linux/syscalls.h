@@ -548,8 +548,11 @@ asmlinkage long sys_utimensat_time32(unsigned int dfd,
 				const char __user *filename,
 				struct old_timespec32 __user *t, int flags);
 
-asmlinkage long sys_traceset_register(int traceset_id, pid_t __user *pids, int amount);
-asmlinkage long sys_traceset_deregister(int traceset_id, pid_t __user *pids, int amount);
+asmlinkage long sys_traceset_register(int traceset_id, 
+                pid_t __user *pids, int amount_targets, 
+                int __user *syscall_nrs, int amount_syscalls);
+asmlinkage long sys_traceset_deregister(int traceset_id, 
+                pid_t __user *pids, int amount);
 
 /* kernel/acct.c */
 asmlinkage long sys_acct(const char __user *name);

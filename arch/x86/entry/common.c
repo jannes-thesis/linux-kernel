@@ -26,7 +26,7 @@
 #include <linux/livepatch.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
-#include <linux/delayacct.h>
+#include <linux/syscacct.h>
 
 #include <asm/desc.h>
 #include <asm/traps.h>
@@ -295,9 +295,15 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 	nr &= __SYSCALL_MASK;
 	if (likely(nr < NR_syscalls)) {
 		nr = array_index_nospec(nr, NR_syscalls);
-        start = ktime_get_ns();
-		regs->ax = sys_call_table[nr](regs);
-        current->delays->syscalls_delay += ktime_get_ns() - start;
+        if (current->syscalls_info_map != NULL) {
+            start = ktime_get_ns();
+		    regs->ax = sys_call_table[nr](regs);
+            printk( KERN_DEBUG "SYSCACCT: task %lu syscall time in ns: %llu \n", 
+                    nr, ktime_get_ns() - start);
+        }
+        else {
+		    regs->ax = sys_call_table[nr](regs);
+        }
 	}
 
 	syscall_return_slowpath(regs);

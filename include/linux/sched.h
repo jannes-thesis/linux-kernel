@@ -30,6 +30,7 @@
 #include <linux/task_io_accounting.h>
 #include <linux/rseq.h>
 
+
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
 struct backing_dev_info;
@@ -1152,6 +1153,10 @@ struct task_struct {
 #ifdef CONFIG_TASK_DELAY_ACCT
 	struct task_delay_info		*delays;
 #endif
+
+    /* map of syscall counts and times */
+    /* only non-NULL if init through register_traceset system call */
+    struct hlist_head* syscalls_info_map;     
 
 #ifdef CONFIG_FAULT_INJECTION
 	int				make_it_fail;

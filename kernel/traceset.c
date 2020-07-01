@@ -7,10 +7,9 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/syscacct.h>
 #include <linux/syscalls.h>
 #include <linux/workqueue.h>
-
-#include <linux/delayacct.h>
 
 #include <uapi/linux/traceset.h>
 
@@ -33,28 +32,44 @@ struct tpool_target {
 
 struct tpool_traceset {
     struct pid* tracer;
-    struct traceset_data* data;
     struct list_head tracees;
+    struct traceset_data* data;
+    int amount_syscalls;
+    int* syscall_nrs;
+    /* always point this to same page and right behind traceset_data */
+    // TODO: check what maximum amount of tracked syscalls can fit in page
+    struct traceset_syscall_data* syscall_data;
 };
 
 
+// TODO: fail if data shared with user does not fit in single page
 /*
- * allocate traceset with empty fields
+ * allocate traceset with empty fields, amount syscall field set
  */
-static struct tpool_traceset* allocate_traceset(void) 
+static struct tpool_traceset* allocate_traceset(int amount_syscalls) 
 {
     struct page* data_page;
     struct tpool_traceset* new_traceset = kmalloc(sizeof(struct tpool_traceset), GFP_KERNEL);
     if (!new_traceset) {
         return NULL;
     }
+    new_traceset->syscall_nrs = kmalloc(sizeof(int) * amount_syscalls, GFP_KERNEL);
+    if (!new_traceset->syscall_nrs) {
+        kfree(new_traceset);
+        return NULL;
+    }
+    new_traceset->amount_syscalls = amount_syscalls;
     data_page = alloc_page(GFP_KERNEL);
     if (!data_page) {
+        kfree(new_traceset->syscall_nrs);
+        kfree(new_traceset);
         printk( KERN_DEBUG "TPOOL: alloc data page failed\n");
         return NULL;
     }
     new_traceset->data = kmap(data_page);
     INIT_LIST_HEAD(&new_traceset->tracees);
+    // point syscall data right after data in same page
+    new_traceset->syscall_data = (struct traceset_syscall_data*) new_traceset->data + 1;
     return new_traceset;
 }
 
@@ -64,7 +79,7 @@ static void free_traceset(struct tpool_traceset* traceset)
     struct tpool_target* target_next;
     struct page* data_page;
     // TODO: verify no need to free pid struct?
-    // free data
+    // free data and syscall data by unmapping and freeing data page
     data_page = virt_to_page((unsigned long) traceset->data);
     kunmap(data_page);
     __free_page(data_page);
@@ -73,10 +88,13 @@ static void free_traceset(struct tpool_traceset* traceset)
         // TODO: need to also delete list entry?
         kfree(target_current);
     }
+    kfree(traceset->syscall_nrs);
     kfree(traceset);
     return;
 }
 
+// TODO: init target tasks sysacct map 
+//       should fail if target is already tracked in other (or same) traceset
 static bool add_target(pid_t task_pid, struct tpool_traceset* traceset) 
 {
     struct tpool_target* new_target = kmalloc(sizeof(struct tpool_target), GFP_KERNEL);
@@ -91,6 +109,8 @@ static bool add_target(pid_t task_pid, struct tpool_traceset* traceset)
     return true;
 }
 
+// TODO: deallocate syscacct map of target task_struct
+// TODO: break loop after removing target once (double addition should be prevented in add_target)
 static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
 {
     struct tpool_target* target_current;
@@ -141,12 +161,11 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
             printk( KERN_DEBUG "TPOOL-WORKER: target task %d not found\n", target_cursor->task_pid);
         }
         else {
+            // TODO: update all syscall data as well
             tp_data->read_bytes += task_cursor->ioac.read_bytes;
             tp_data->write_bytes += task_cursor->ioac.write_bytes;
 	        rcu_read_unlock();
             printk( KERN_DEBUG "TPOOL-WORKER: target task %d found\n", target_cursor->task_pid);
-            printk( KERN_DEBUG "TPOOL-WORKER: task %d syscall time in ns: %llu \n", 
-                    target_cursor->task_pid, task_cursor->delays->syscalls_delay);
         }
     }
 }
@@ -189,9 +208,34 @@ static struct file_operations shared_data_fops =
 };
 
 
-static pid_t* copy_alloc_target_pids(pid_t __user * task_pids, int amount)
+// TODO: validation of syscall nr array
+/*
+ * initalize the syscall nr array of given traceset
+ * in case of failure syscall nr array will be NULL
+ */
+static int init_syscalls_array(struct tpool_traceset* traceset, int __user * syscall_nrs, int amount)
 {
 
+    // copy pid array from user space
+    unsigned long l = sizeof(int) * amount;
+    traceset->syscall_nrs = kmalloc(l, GFP_KERNEL);
+    if (!traceset->syscall_nrs) {
+        printk( KERN_DEBUG "TPOOL: could not allocate new syscall nrs array\n");
+        return -ENOMEM;
+    }
+    l = copy_from_user(traceset->syscall_nrs, syscall_nrs, sizeof(int) * amount);
+    if (l != 0) {
+        printk( KERN_DEBUG "TPOOL: could not copy data from user\n");
+        printk( KERN_DEBUG "TPOOL: %lu bytes not copied\n", l);
+        kfree(syscall_nrs);
+        return -EFAULT;
+    }
+    return 0;
+}
+
+// TODO: different errors for mem alloc failure and invalid user data
+static pid_t* copy_alloc_target_pids(pid_t __user * task_pids, int amount)
+{
     // copy pid array from user space
     unsigned long l = sizeof(pid_t) * amount;
     pid_t* tracee_pids = kmalloc(l, GFP_KERNEL);
@@ -242,7 +286,9 @@ static int get_traceset_data_fd(struct traceset_data* tdata)
  *
  * if registering targets for existing set, return 0
  */
-SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, int, amount)
+SYSCALL_DEFINE5(traceset_register, int, traceset_id, 
+                pid_t __user *, task_pids, int, amount_targets,
+                int __user *, syscall_nrs, int, amount_syscalls)
 {
     int i;
     int fd;
@@ -255,7 +301,7 @@ SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, 
     if (traceset_id < 0) {
         is_new = true;
         /* init traceset and id, insert in traceset map */
-        traceset = allocate_traceset();
+        traceset = allocate_traceset(amount_syscalls);
         if (!traceset) {
             printk( KERN_DEBUG "TPOOL: could not allocate new traceset\n");
             spin_unlock(&traceset_module_lock);
@@ -270,9 +316,14 @@ SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, 
         }
         printk( KERN_DEBUG "TPOOL: inserted new traceset with id %d\n", traceset_id);
         traceset->tracer = task_pid(current);
-        traceset->data->amount_targets = amount;
+        traceset->data->amount_targets = amount_targets;
         traceset->data->amount_current = 0;
         traceset->data->traceset_id = traceset_id;
+        i = init_syscalls_array(traceset, syscall_nrs, amount_syscalls);
+        if (i != 0) {
+            free_traceset(traceset);
+            return i;
+        }
     }
     else {
         is_new = false;
@@ -283,14 +334,18 @@ SYSCALL_DEFINE3(traceset_register, int, traceset_id, pid_t __user *, task_pids, 
         }
     }
 
-    // copy pid array from user space
-    tracee_pids = copy_alloc_target_pids(task_pids, amount);
-    if (!tracee_pids) {
-        goto err;
+    if (amount_targets > 0) {
+        // copy pid array from user space
+        tracee_pids = copy_alloc_target_pids(task_pids, amount_targets);
+        if (!tracee_pids) {
+            goto err;
+        }
     }
 
     // add targets to traceset
-    for (i = 0; i < amount; i++) {
+    // TODO: validate that all targets all children of caller (check if TGIDs are equal)
+    //       use the pidhash map to find TGIDs fast
+    for (i = 0; i < amount_targets; i++) {
         if (!add_target(tracee_pids[i], traceset)) {
             printk( KERN_DEBUG "TPOOL: adding target to list failed\n");
         }

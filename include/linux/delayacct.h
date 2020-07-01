@@ -18,6 +18,7 @@
 #define DELAYACCT_PF_BLKIO	0x00000002	/* I am waiting on IO */
 
 #ifdef CONFIG_TASK_DELAY_ACCT
+
 struct task_delay_info {
 	raw_spinlock_t	lock;
 	unsigned int	flags;	/* Private per-task flags */
@@ -53,8 +54,6 @@ struct task_delay_info {
 
 	u32 freepages_count;	/* total count of memory reclaim */
 	u32 thrashing_count;	/* total count of thrash waits */
-
-    u64 syscalls_delay;     /* total time spent in all system call handlers */
 };
 #endif
 
@@ -75,6 +74,7 @@ extern void __delayacct_freepages_start(void);
 extern void __delayacct_freepages_end(void);
 extern void __delayacct_thrashing_start(void);
 extern void __delayacct_thrashing_end(void);
+
 
 static inline int delayacct_is_task_waiting_on_io(struct task_struct *p)
 {
