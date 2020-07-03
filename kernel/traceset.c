@@ -49,6 +49,7 @@ struct tpool_traceset {
 static struct tpool_traceset* allocate_traceset(int amount_syscalls) 
 {
     struct page* data_page;
+    int i;
     struct tpool_traceset* new_traceset = kmalloc(sizeof(struct tpool_traceset), GFP_KERNEL);
     if (!new_traceset) {
         return NULL;
@@ -69,7 +70,11 @@ static struct tpool_traceset* allocate_traceset(int amount_syscalls)
     new_traceset->data = kmap(data_page);
     INIT_LIST_HEAD(&new_traceset->tracees);
     // point syscall data right after data in same page
-    new_traceset->syscall_data = (struct traceset_syscall_data*) new_traceset->data + 1;
+    new_traceset->syscall_data = (struct traceset_syscall_data*) (new_traceset->data + 1);
+    for (i = 0; i < amount_syscalls; i++) {
+        new_traceset->syscall_data[i].count = 0;
+        new_traceset->syscall_data[i].total_time = 0;
+    }
     return new_traceset;
 }
 
@@ -105,7 +110,7 @@ static bool add_target(pid_t task_pid, struct tpool_traceset* traceset)
     new_target->task_pid = task_pid;
     INIT_LIST_HEAD(&new_target->list_node);
     list_add(&new_target->list_node, &traceset->tracees);
-    traceset->data->amount_current++;
+    traceset->data->amount_targets++;
     return true;
 }
 
@@ -122,7 +127,7 @@ static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
             printk( KERN_DEBUG "TPOOL: found target to be removed: %d\n", task_pid);
             list_del(&target_current->list_node);
             kfree(target_current);
-            traceset->data->amount_current--;
+            traceset->data->amount_targets--;
             ret = true;
         }
     }
@@ -316,12 +321,12 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         }
         printk( KERN_DEBUG "TPOOL: inserted new traceset with id %d\n", traceset_id);
         traceset->tracer = task_pid(current);
-        traceset->data->amount_targets = amount_targets;
-        traceset->data->amount_current = 0;
+        traceset->data->amount_targets = 0;
         traceset->data->traceset_id = traceset_id;
         i = init_syscalls_array(traceset, syscall_nrs, amount_syscalls);
         if (i != 0) {
             free_traceset(traceset);
+            spin_unlock(&traceset_module_lock);
             return i;
         }
     }
@@ -401,7 +406,7 @@ SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids
         goto err;
     }
     if (amount <= 0) {
-        deregister_amount = traceset->data->amount_current;
+        deregister_amount = traceset->data->amount_targets;
         idr_remove(&tpool_module_map, traceset_id);
         free_traceset(traceset);
     }
