@@ -64,7 +64,7 @@ static struct tpool_traceset* allocate_traceset(int amount_syscalls)
     if (!data_page) {
         kfree(new_traceset->syscall_nrs);
         kfree(new_traceset);
-        printk( KERN_DEBUG "TPOOL: alloc data page failed\n");
+        printk( KERN_DEBUG "TRACESET: alloc data page failed\n");
         return NULL;
     }
     new_traceset->data = kmap(data_page);
@@ -102,9 +102,28 @@ static void free_traceset(struct tpool_traceset* traceset)
 //       should fail if target is already tracked in other (or same) traceset
 static bool add_target(pid_t task_pid, struct tpool_traceset* traceset) 
 {
+    struct task_struct* target_task;
+    struct pid* pid_struct;
     struct tpool_target* new_target = kmalloc(sizeof(struct tpool_target), GFP_KERNEL);
     if (!new_target) {
-        printk( KERN_DEBUG "TPOOL: kmalloc new target failed\n");
+        printk( KERN_DEBUG "TRACESET: kmalloc new target failed\n");
+        return false;
+    } 
+    printk( KERN_DEBUG "TRACESET: adding target %d\n", task_pid);
+    pid_struct = find_get_pid(task_pid);
+	rcu_read_lock();
+    target_task = pid_task(pid_struct, PIDTYPE_PID);
+    if (target_task == NULL || target_task->syscalls_accounting.info != NULL) {
+	    rcu_read_unlock();
+        kfree(new_target);
+        printk( KERN_DEBUG "TRACESET: target task %d not found or already a target, don't add as target\n", task_pid);
+        return false;
+    }
+    syscacct_tsk_init(target_task, traceset->syscall_nrs, traceset->amount_syscalls);
+    if (!target_task->syscalls_accounting.info) {
+        rcu_read_unlock();
+        kfree(new_target);
+        printk( KERN_DEBUG "TRACESET: target task %d syscall accounting could not be initalized\n", task_pid);
         return false;
     }
     new_target->task_pid = task_pid;
@@ -121,10 +140,10 @@ static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
     struct tpool_target* target_current;
     struct tpool_target* target_next;
     bool ret = false;
-    printk( KERN_DEBUG "TPOOL: remove target: %d\n", task_pid);
+    printk( KERN_DEBUG "TRACESET: remove target: %d\n", task_pid);
     list_for_each_entry_safe(target_current, target_next, &traceset->tracees, list_node) {
         if (target_current->task_pid == task_pid) {
-            printk( KERN_DEBUG "TPOOL: found target to be removed: %d\n", task_pid);
+            printk( KERN_DEBUG "TRACESET: found target to be removed: %d\n", task_pid);
             list_del(&target_current->list_node);
             kfree(target_current);
             traceset->data->amount_targets--;
@@ -142,16 +161,16 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
     struct task_struct* task_cursor;
     struct pid* pid_struct_cursor;
 
-    printk( KERN_DEBUG "TPOOL-WORKER: check if traceset %d tracer is alive\n", id);
+    printk( KERN_DEBUG "TRACESET-WORKER: check if traceset %d tracer is alive\n", id);
     task_cursor = get_pid_task(traceset->tracer, PIDTYPE_PID);
     if (task_cursor == NULL) {
-        printk( KERN_DEBUG "TPOOL-WORKER: traceset %d tracer is not alive\n", id);
+        printk( KERN_DEBUG "TRACESET-WORKER: traceset %d tracer is not alive\n", id);
         idr_remove(&tpool_module_map, id);
         free_traceset(traceset);
         return;
     }
 
-    printk( KERN_DEBUG "TPOOL-WORKER: update traceset %d\n", id);
+    printk( KERN_DEBUG "TRACESET-WORKER: update traceset %d\n", id);
     tp_data->read_bytes = 0;
     tp_data->write_bytes = 0;
     
@@ -163,14 +182,14 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
         task_cursor = pid_task(pid_struct_cursor, PIDTYPE_PID);
         if (task_cursor == NULL) {
 	        rcu_read_unlock();
-            printk( KERN_DEBUG "TPOOL-WORKER: target task %d not found\n", target_cursor->task_pid);
+            printk( KERN_DEBUG "TRACESET-WORKER: target task %d not found\n", target_cursor->task_pid);
         }
         else {
             // TODO: update all syscall data as well
             tp_data->read_bytes += task_cursor->ioac.read_bytes;
             tp_data->write_bytes += task_cursor->ioac.write_bytes;
 	        rcu_read_unlock();
-            printk( KERN_DEBUG "TPOOL-WORKER: target task %d found\n", target_cursor->task_pid);
+            printk( KERN_DEBUG "TRACESET-WORKER: target task %d found\n", target_cursor->task_pid);
         }
     }
 }
@@ -183,10 +202,10 @@ static int __update_traceset_data(int id, void* traceset, void* unused)
 
 static void work_handler(struct work_struct* work_arg) 
 {
-    printk( KERN_DEBUG "TPOOL-WORKER: start execution\n");
+    printk( KERN_DEBUG "TRACESET-WORKER: start execution\n");
     spin_lock(&traceset_module_lock);
     if (idr_is_empty(&tpool_module_map)) {
-        printk( KERN_DEBUG "TPOOL-WORKER: 0 tracesets registered, stopping\n");
+        printk( KERN_DEBUG "TRACESET-WORKER: 0 tracesets registered, stopping\n");
         worker_active = false;
     }
     else {
@@ -225,13 +244,13 @@ static int init_syscalls_array(struct tpool_traceset* traceset, int __user * sys
     unsigned long l = sizeof(int) * amount;
     traceset->syscall_nrs = kmalloc(l, GFP_KERNEL);
     if (!traceset->syscall_nrs) {
-        printk( KERN_DEBUG "TPOOL: could not allocate new syscall nrs array\n");
+        printk( KERN_DEBUG "TRACESET: could not allocate new syscall nrs array\n");
         return -ENOMEM;
     }
     l = copy_from_user(traceset->syscall_nrs, syscall_nrs, sizeof(int) * amount);
     if (l != 0) {
-        printk( KERN_DEBUG "TPOOL: could not copy data from user\n");
-        printk( KERN_DEBUG "TPOOL: %lu bytes not copied\n", l);
+        printk( KERN_DEBUG "TRACESET: could not copy data from user\n");
+        printk( KERN_DEBUG "TRACESET: %lu bytes not copied\n", l);
         kfree(syscall_nrs);
         return -EFAULT;
     }
@@ -245,14 +264,14 @@ static pid_t* copy_alloc_target_pids(pid_t __user * task_pids, int amount)
     unsigned long l = sizeof(pid_t) * amount;
     pid_t* tracee_pids = kmalloc(l, GFP_KERNEL);
     if (!tracee_pids) {
-        printk( KERN_DEBUG "TPOOL: could not allocate new tracee array\n");
+        printk( KERN_DEBUG "TRACESET: could not allocate new tracee array\n");
         return NULL;
     }
-    printk( KERN_DEBUG "TPOOL: need to copy %lu bytes from user\n", l);
+    printk( KERN_DEBUG "TRACESET: need to copy %lu bytes from user\n", l);
     l = copy_from_user(tracee_pids, task_pids, sizeof(pid_t) * amount);
     if (l != 0) {
-        printk( KERN_DEBUG "TPOOL: could not copy data from user\n");
-        printk( KERN_DEBUG "TPOOL: %lu bytes not copied\n", l);
+        printk( KERN_DEBUG "TRACESET: could not copy data from user\n");
+        printk( KERN_DEBUG "TRACESET: %lu bytes not copied\n", l);
         kfree(tracee_pids);
         return NULL;
     }
@@ -265,14 +284,14 @@ static int get_traceset_data_fd(struct traceset_data* tdata)
     int fd;
     fd = get_unused_fd_flags(O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
-        printk( KERN_DEBUG "TPOOL: getting unused fd failed\n");
+        printk( KERN_DEBUG "TRACESET: getting unused fd failed\n");
         return -1;
     }
 
 	filp = anon_inode_getfile("traceset_data", &shared_data_fops, 
                                 tdata, O_RDWR | O_CLOEXEC);
 	if (IS_ERR(filp)) {
-        printk( KERN_DEBUG "TPOOL: getting file failed\n");
+        printk( KERN_DEBUG "TRACESET: getting file failed\n");
 		put_unused_fd(fd);
         return -1;
 	}
@@ -308,18 +327,18 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         /* init traceset and id, insert in traceset map */
         traceset = allocate_traceset(amount_syscalls);
         if (!traceset) {
-            printk( KERN_DEBUG "TPOOL: could not allocate new traceset\n");
+            printk( KERN_DEBUG "TRACESET: could not allocate new traceset\n");
             spin_unlock(&traceset_module_lock);
             return -ENOMEM;
         }
         traceset_id = idr_alloc(&tpool_module_map, traceset, 0, 100, GFP_KERNEL);
         if (traceset_id < 0) {
-            printk( KERN_DEBUG "TPOOL: could not insert new traceset in map\n");
+            printk( KERN_DEBUG "TRACESET: could not insert new traceset in map\n");
             free_traceset(traceset);
             spin_unlock(&traceset_module_lock);
             return -EFAULT;
         }
-        printk( KERN_DEBUG "TPOOL: inserted new traceset with id %d\n", traceset_id);
+        printk( KERN_DEBUG "TRACESET: inserted new traceset with id %d\n", traceset_id);
         traceset->tracer = task_pid(current);
         traceset->data->amount_targets = 0;
         traceset->data->traceset_id = traceset_id;
@@ -334,7 +353,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         is_new = false;
         traceset = idr_find(&tpool_module_map, traceset_id);
         if (!traceset) {
-            printk( KERN_DEBUG "TPOOL: could not find traceset with id %d\n", traceset_id);
+            printk( KERN_DEBUG "TRACESET: could not find traceset with id %d\n", traceset_id);
             goto err;
         }
     }
@@ -352,7 +371,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
     //       use the pidhash map to find TGIDs fast
     for (i = 0; i < amount_targets; i++) {
         if (!add_target(tracee_pids[i], traceset)) {
-            printk( KERN_DEBUG "TPOOL: adding target to list failed\n");
+            printk( KERN_DEBUG "TRACESET: adding target to list failed\n");
         }
     }
 
@@ -402,7 +421,7 @@ SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids
     spin_lock(&traceset_module_lock);
     traceset = idr_find(&tpool_module_map, traceset_id);
     if (!traceset) {
-        printk( KERN_DEBUG "TPOOL: could not find traceset with id %d\n", traceset_id);
+        printk( KERN_DEBUG "TRACESET: could not find traceset with id %d\n", traceset_id);
         goto err;
     }
     if (amount <= 0) {
@@ -419,7 +438,7 @@ SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids
         // remove targets from traceset
         for (i = 0; i < amount; i++) {
             if (!remove_target(tracee_pids[i], traceset)) {
-                printk( KERN_DEBUG "TPOOL: removing target %d failed\n", tracee_pids[i]);
+                printk( KERN_DEBUG "TRACESET: removing target %d failed\n", tracee_pids[i]);
             }
             else {
                 deregister_amount++;

@@ -29,6 +29,7 @@
 #include <linux/mm_types_task.h>
 #include <linux/task_io_accounting.h>
 #include <linux/rseq.h>
+#include <linux/syscacct.h>
 
 
 /* task_struct member predeclarations (sorted alphabetically): */
@@ -1155,8 +1156,8 @@ struct task_struct {
 #endif
 
     /* map of syscall counts and times */
-    /* only non-NULL if init through register_traceset system call */
-    struct hlist_head* syscalls_info_map;     
+    /* only init through register_traceset system call */
+    struct syscacct_info syscalls_accounting;     
 
 #ifdef CONFIG_FAULT_INJECTION
 	int				make_it_fail;

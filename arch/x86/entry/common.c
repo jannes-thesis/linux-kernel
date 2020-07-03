@@ -26,7 +26,6 @@
 #include <linux/livepatch.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
-#include <linux/syscacct.h>
 
 #include <asm/desc.h>
 #include <asm/traps.h>
@@ -279,6 +278,8 @@ __visible inline void syscall_return_slowpath(struct pt_regs *regs)
 __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 {
 	struct thread_info *ti;
+    struct syscacct_info* sacct_info;
+    struct syscacct_entry* sacct_entry;
     u64 start;
 
 	enter_from_user_mode();
@@ -295,15 +296,26 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 	nr &= __SYSCALL_MASK;
 	if (likely(nr < NR_syscalls)) {
 		nr = array_index_nospec(nr, NR_syscalls);
-        if (current->syscalls_info_map != NULL) {
-            start = ktime_get_ns();
-		    regs->ax = sys_call_table[nr](regs);
-            printk( KERN_DEBUG "SYSCACCT: task %lu syscall time in ns: %llu \n", 
-                    nr, ktime_get_ns() - start);
+        /* if (current->pid == 1) { */
+        /*     printk( KERN_DEBUG "SYSCACCT-common: account task %d: syscall %lu\n", current->pid, nr); */
+        /*     sacct_info = &current->syscalls_accounting; */
+        /*     printk( KERN_DEBUG "SYSCACCT-common: sacct_info pointer: %pS \n", sacct_info); */
+        /*     printk( KERN_DEBUG "SYSCACCT-common: accessing info field: %pS \n", sacct_info->info); */
+        /* } */
+        if (current->syscalls_accounting.info != NULL) {
+            sacct_entry = syscacct_tsk_find_entry(current, nr);
+            if (sacct_entry != NULL) {
+                printk( KERN_DEBUG "SYSCACCT in common: account task %d: syscall %lu\n", current->pid, nr);
+                start = ktime_get_ns();
+		        regs->ax = sys_call_table[nr](regs);
+                /* sacct->syscall_delay += ktime_get_ns() - start; */
+                /* sacct->syscall_count++; */
+            }
         }
         else {
 		    regs->ax = sys_call_table[nr](regs);
         }
+		/* regs->ax = sys_call_table[nr](regs); */
 	}
 
 	syscall_return_slowpath(regs);
