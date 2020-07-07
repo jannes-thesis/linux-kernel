@@ -126,6 +126,7 @@ static bool add_target(pid_t task_pid, struct tpool_traceset* traceset)
         printk( KERN_DEBUG "TRACESET: target task %d syscall accounting could not be initalized\n", task_pid);
         return false;
     }
+    rcu_read_unlock();
     new_target->task_pid = task_pid;
     INIT_LIST_HEAD(&new_target->list_node);
     list_add(&new_target->list_node, &traceset->tracees);
@@ -156,10 +157,17 @@ static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
 static void update_traceset_data(int id, struct tpool_traceset* traceset)
 {
     struct traceset_data* tp_data = traceset->data;
+    struct syscacct_entry* syscall_data_entry;
     struct list_head* tracees = &traceset->tracees;
     struct tpool_target* target_cursor;
     struct task_struct* task_cursor;
     struct pid* pid_struct_cursor;
+    int i;
+
+    u64 agg_read_bytes = 0;
+    u64 agg_write_bytes = 0;
+    u32* agg_counts;
+    u64* agg_times;
 
     printk( KERN_DEBUG "TRACESET-WORKER: check if traceset %d tracer is alive\n", id);
     task_cursor = get_pid_task(traceset->tracer, PIDTYPE_PID);
@@ -169,6 +177,10 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
         free_traceset(traceset);
         return;
     }
+
+    // TODO: handle kzalloc fail
+    agg_counts = kzalloc(sizeof(u32) * traceset->amount_syscalls, GFP_KERNEL);
+    agg_times = kzalloc(sizeof(u64) * traceset->amount_syscalls, GFP_KERNEL);
 
     printk( KERN_DEBUG "TRACESET-WORKER: update traceset %d\n", id);
     tp_data->read_bytes = 0;
@@ -185,13 +197,29 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
             printk( KERN_DEBUG "TRACESET-WORKER: target task %d not found\n", target_cursor->task_pid);
         }
         else {
-            // TODO: update all syscall data as well
-            tp_data->read_bytes += task_cursor->ioac.read_bytes;
-            tp_data->write_bytes += task_cursor->ioac.write_bytes;
+            agg_read_bytes += task_cursor->ioac.read_bytes;
+            agg_write_bytes += task_cursor->ioac.write_bytes;
+            for (i = 0; i < traceset->amount_syscalls; i++) {
+                syscall_data_entry = syscacct_tsk_find_entry(task_cursor, traceset->syscall_nrs[i]);
+                if (syscall_data_entry == NULL) {
+                    printk( KERN_DEBUG "TRACESET-WORKER: syscall data entry for target not found, nr: %d\n", traceset->syscall_nrs[i]);
+                }
+                else {
+                    agg_counts[i] += syscall_data_entry->syscall_count;
+                    agg_times[i] += syscall_data_entry->syscall_delay;
+                }
+            }
 	        rcu_read_unlock();
             printk( KERN_DEBUG "TRACESET-WORKER: target task %d found\n", target_cursor->task_pid);
         }
     }
+
+    for (i = 0; i < traceset->amount_syscalls; i++) {
+        traceset->syscall_data[i].count = agg_counts[i];
+        traceset->syscall_data[i].total_time = agg_times[i];
+    }
+    traceset->data->read_bytes = agg_read_bytes;
+    traceset->data->write_bytes = agg_write_bytes;
 }
 
 static int __update_traceset_data(int id, void* traceset, void* unused)

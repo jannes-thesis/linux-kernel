@@ -308,8 +308,11 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
                 printk( KERN_DEBUG "SYSCACCT in common: account task %d: syscall %lu\n", current->pid, nr);
                 start = ktime_get_ns();
 		        regs->ax = sys_call_table[nr](regs);
-                /* sacct->syscall_delay += ktime_get_ns() - start; */
-                /* sacct->syscall_count++; */
+                sacct_entry->syscall_delay += ktime_get_ns() - start;
+                sacct_entry->syscall_count++;
+            }
+            else {
+		        regs->ax = sys_call_table[nr](regs);
             }
         }
         else {

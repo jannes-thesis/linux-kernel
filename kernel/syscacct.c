@@ -121,8 +121,7 @@ struct syscacct_entry* syscacct_tsk_find_entry(struct task_struct* tsk, int sysc
     if (acct_info == NULL) {
         return NULL;
     }
-    /* return syscacct_find_entry_alt(acct_info, syscall_nr); */
-    return NULL;
+    return syscacct_find_entry_alt(acct_info, syscall_nr);
 }
 
 void syscacct_tsk_free(struct task_struct* tsk)
