@@ -98,8 +98,7 @@ static void free_traceset(struct tpool_traceset* traceset)
     return;
 }
 
-// TODO: init target tasks sysacct map 
-//       should fail if target is already tracked in other (or same) traceset
+/* fails if task is not found or is already target */
 static bool add_target(pid_t task_pid, struct tpool_traceset* traceset) 
 {
     struct task_struct* target_task;
@@ -119,13 +118,15 @@ static bool add_target(pid_t task_pid, struct tpool_traceset* traceset)
         printk( KERN_DEBUG "TRACESET: target task %d not found or already a target, don't add as target\n", task_pid);
         return false;
     }
-    syscacct_tsk_init(target_task, traceset->syscall_nrs, traceset->amount_syscalls);
-    if (!target_task->syscalls_accounting.info) {
+    syscacct_tsk_lock(target_task);
+    if (!syscacct_tsk_register(target_task, traceset->syscall_nrs, traceset->amount_syscalls)) {
+        syscacct_tsk_unlock(target_task);
         rcu_read_unlock();
         kfree(new_target);
         printk( KERN_DEBUG "TRACESET: target task %d syscall accounting could not be initalized\n", task_pid);
         return false;
     }
+    syscacct_tsk_unlock(target_task);
     rcu_read_unlock();
     new_target->task_pid = task_pid;
     INIT_LIST_HEAD(&new_target->list_node);
@@ -134,13 +135,10 @@ static bool add_target(pid_t task_pid, struct tpool_traceset* traceset)
     return true;
 }
 
-// TODO: deallocate syscacct map of target task_struct
-// TODO: break loop after removing target once (double addition should be prevented in add_target)
 static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
 {
     struct tpool_target* target_current;
     struct tpool_target* target_next;
-    bool ret = false;
     printk( KERN_DEBUG "TRACESET: remove target: %d\n", task_pid);
     list_for_each_entry_safe(target_current, target_next, &traceset->tracees, list_node) {
         if (target_current->task_pid == task_pid) {
@@ -148,10 +146,11 @@ static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
             list_del(&target_current->list_node);
             kfree(target_current);
             traceset->data->amount_targets--;
-            ret = true;
+            // TODO: deallocate syscacct map of target task_struct
+            return true;
         }
     }
-    return ret;
+    return false;
 }
 
 static void update_traceset_data(int id, struct tpool_traceset* traceset)
@@ -199,6 +198,7 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
         else {
             agg_read_bytes += task_cursor->ioac.read_bytes;
             agg_write_bytes += task_cursor->ioac.write_bytes;
+            syscacct_tsk_lock(task_cursor);
             for (i = 0; i < traceset->amount_syscalls; i++) {
                 syscall_data_entry = syscacct_tsk_find_entry(task_cursor, traceset->syscall_nrs[i]);
                 if (syscall_data_entry == NULL) {
@@ -209,6 +209,7 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
                     agg_times[i] += syscall_data_entry->syscall_delay;
                 }
             }
+            syscacct_tsk_unlock(task_cursor);
 	        rcu_read_unlock();
             printk( KERN_DEBUG "TRACESET-WORKER: target task %d found\n", target_cursor->task_pid);
         }

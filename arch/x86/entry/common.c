@@ -278,7 +278,6 @@ __visible inline void syscall_return_slowpath(struct pt_regs *regs)
 __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 {
 	struct thread_info *ti;
-    struct syscacct_info* sacct_info;
     struct syscacct_entry* sacct_entry;
     u64 start;
 
@@ -297,6 +296,7 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 	if (likely(nr < NR_syscalls)) {
 		nr = array_index_nospec(nr, NR_syscalls);
         if (current->syscalls_accounting.info != NULL) {
+            syscacct_tsk_lock(current);
             sacct_entry = syscacct_tsk_find_entry(current, nr);
             if (sacct_entry != NULL) {
                 /* printk( KERN_DEBUG "SYSCACCT in common: account task %d: syscall %lu\n", current->pid, nr); */
@@ -304,8 +304,10 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 		        regs->ax = sys_call_table[nr](regs);
                 sacct_entry->syscall_delay += ktime_get_ns() - start;
                 sacct_entry->syscall_count++;
+                syscacct_tsk_unlock(current);
             }
             else {
+                syscacct_tsk_unlock(current);
 		        regs->ax = sys_call_table[nr](regs);
             }
         }

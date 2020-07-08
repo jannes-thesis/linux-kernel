@@ -93,6 +93,7 @@
 #include <linux/rodata_test.h>
 #include <linux/jump_label.h>
 #include <linux/mem_encrypt.h>
+#include <linux/syscacct.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -773,6 +774,7 @@ asmlinkage __visible void __init start_kernel(void)
 	cgroup_init();
 	taskstats_init_early();
 	delayacct_init();
+    syscacct_init_first();
 
 	poking_init();
 	check_bugs();
