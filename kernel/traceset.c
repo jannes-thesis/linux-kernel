@@ -17,7 +17,7 @@ static void work_handler(struct work_struct* work_arg);
 
 /* ==== statically allocated global data ==== */
 /* traceset id -> traceset hashmap */
-DEFINE_IDR(tpool_module_map);
+DEFINE_IDR(traceset_map);
 /* whether update work is scheduled or not */
 bool worker_active = false;
 /* spinlock for traceset map and active worker var */
@@ -25,12 +25,12 @@ DEFINE_SPINLOCK(traceset_module_lock);
 /* wrapper for the worker function */
 DECLARE_DELAYED_WORK(update_work, work_handler);
 
-struct tpool_target {
+struct traceset_target {
     pid_t task_pid;
     struct list_head list_node;
 };
 
-struct tpool_traceset {
+struct traceset_info {
     struct pid* tracer;
     struct list_head tracees;
     struct traceset_data* data;
@@ -46,11 +46,11 @@ struct tpool_traceset {
 /*
  * allocate traceset with empty fields, amount syscall field set
  */
-static struct tpool_traceset* allocate_traceset(int amount_syscalls) 
+static struct traceset_info* allocate_traceset(int amount_syscalls) 
 {
     struct page* data_page;
     int i;
-    struct tpool_traceset* new_traceset = kmalloc(sizeof(struct tpool_traceset), GFP_KERNEL);
+    struct traceset_info* new_traceset = kmalloc(sizeof(struct traceset_info), GFP_KERNEL);
     if (!new_traceset) {
         return NULL;
     }
@@ -78,10 +78,10 @@ static struct tpool_traceset* allocate_traceset(int amount_syscalls)
     return new_traceset;
 }
 
-static void free_traceset(struct tpool_traceset* traceset)
+static void free_traceset(struct traceset_info* traceset)
 {
-    struct tpool_target* target_current;
-    struct tpool_target* target_next;
+    struct traceset_target* target_current;
+    struct traceset_target* target_next;
     struct page* data_page;
     // TODO: verify no need to free pid struct?
     // free data and syscall data by unmapping and freeing data page
@@ -99,11 +99,11 @@ static void free_traceset(struct tpool_traceset* traceset)
 }
 
 /* fails if task is not found or is already target */
-static bool add_target(pid_t task_pid, struct tpool_traceset* traceset) 
+static bool add_target(pid_t task_pid, struct traceset_info* traceset) 
 {
     struct task_struct* target_task;
     struct pid* pid_struct;
-    struct tpool_target* new_target = kmalloc(sizeof(struct tpool_target), GFP_KERNEL);
+    struct traceset_target* new_target = kmalloc(sizeof(struct traceset_target), GFP_KERNEL);
     if (!new_target) {
         printk( KERN_DEBUG "TRACESET: kmalloc new target failed\n");
         return false;
@@ -135,10 +135,10 @@ static bool add_target(pid_t task_pid, struct tpool_traceset* traceset)
     return true;
 }
 
-static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
+static bool remove_target(pid_t task_pid, struct traceset_info* traceset)
 {
-    struct tpool_target* target_current;
-    struct tpool_target* target_next;
+    struct traceset_target* target_current;
+    struct traceset_target* target_next;
     printk( KERN_DEBUG "TRACESET: remove target: %d\n", task_pid);
     list_for_each_entry_safe(target_current, target_next, &traceset->tracees, list_node) {
         if (target_current->task_pid == task_pid) {
@@ -153,12 +153,12 @@ static bool remove_target(pid_t task_pid, struct tpool_traceset* traceset)
     return false;
 }
 
-static void update_traceset_data(int id, struct tpool_traceset* traceset)
+static void update_traceset_data(int id, struct traceset_info* traceset)
 {
     struct traceset_data* tp_data = traceset->data;
     struct syscacct_entry* syscall_data_entry;
     struct list_head* tracees = &traceset->tracees;
-    struct tpool_target* target_cursor;
+    struct traceset_target* target_cursor;
     struct task_struct* task_cursor;
     struct pid* pid_struct_cursor;
     int i;
@@ -172,7 +172,7 @@ static void update_traceset_data(int id, struct tpool_traceset* traceset)
     task_cursor = get_pid_task(traceset->tracer, PIDTYPE_PID);
     if (task_cursor == NULL) {
         printk( KERN_DEBUG "TRACESET-WORKER: traceset %d tracer is not alive\n", id);
-        idr_remove(&tpool_module_map, id);
+        idr_remove(&traceset_map, id);
         free_traceset(traceset);
         return;
     }
@@ -233,12 +233,12 @@ static void work_handler(struct work_struct* work_arg)
 {
     printk( KERN_DEBUG "TRACESET-WORKER: start execution\n");
     spin_lock(&traceset_module_lock);
-    if (idr_is_empty(&tpool_module_map)) {
+    if (idr_is_empty(&traceset_map)) {
         printk( KERN_DEBUG "TRACESET-WORKER: 0 tracesets registered, stopping\n");
         worker_active = false;
     }
     else {
-        idr_for_each(&tpool_module_map, __update_traceset_data, NULL);
+        idr_for_each(&traceset_map, __update_traceset_data, NULL);
         schedule_delayed_work(&update_work, 10 * HZ);
     }
     spin_unlock(&traceset_module_lock);
@@ -266,7 +266,7 @@ static struct file_operations shared_data_fops =
  * initalize the syscall nr array of given traceset
  * in case of failure syscall nr array will be NULL
  */
-static int init_syscalls_array(struct tpool_traceset* traceset, int __user * syscall_nrs, int amount)
+static int init_syscalls_array(struct traceset_info* traceset, int __user * syscall_nrs, int amount)
 {
 
     // copy pid array from user space
@@ -345,7 +345,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
 {
     int i;
     int fd;
-    struct tpool_traceset* traceset;
+    struct traceset_info* traceset;
     pid_t* tracee_pids;
     bool is_new;
 
@@ -360,7 +360,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
             spin_unlock(&traceset_module_lock);
             return -ENOMEM;
         }
-        traceset_id = idr_alloc(&tpool_module_map, traceset, 0, 100, GFP_KERNEL);
+        traceset_id = idr_alloc(&traceset_map, traceset, 0, 100, GFP_KERNEL);
         if (traceset_id < 0) {
             printk( KERN_DEBUG "TRACESET: could not insert new traceset in map\n");
             free_traceset(traceset);
@@ -380,7 +380,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
     }
     else {
         is_new = false;
-        traceset = idr_find(&tpool_module_map, traceset_id);
+        traceset = idr_find(&traceset_map, traceset_id);
         if (!traceset) {
             printk( KERN_DEBUG "TRACESET: could not find traceset with id %d\n", traceset_id);
             goto err;
@@ -418,7 +418,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
     // if worker was inactive, perform one traceset update and schedule worker
     if (!worker_active) {
         worker_active = true;
-        idr_for_each(&tpool_module_map, __update_traceset_data, NULL);
+        idr_for_each(&traceset_map, __update_traceset_data, NULL);
         schedule_delayed_work(&update_work, 10 * HZ);
     }
 
@@ -426,7 +426,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
     return fd;
 err:
     if (is_new) {
-        idr_remove(&tpool_module_map, traceset_id);
+        idr_remove(&traceset_map, traceset_id);
         free_traceset(traceset);
     }
     spin_unlock(&traceset_module_lock);
@@ -443,19 +443,19 @@ err:
  */
 SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids, int, amount)
 {
-    struct tpool_traceset* traceset;
     int i;
     int deregister_amount = 0;
     pid_t* tracee_pids;
+    struct traceset_info* traceset;
     spin_lock(&traceset_module_lock);
-    traceset = idr_find(&tpool_module_map, traceset_id);
+    traceset = idr_find(&traceset_map, traceset_id);
     if (!traceset) {
         printk( KERN_DEBUG "TRACESET: could not find traceset with id %d\n", traceset_id);
         goto err;
     }
     if (amount <= 0) {
         deregister_amount = traceset->data->amount_targets;
-        idr_remove(&tpool_module_map, traceset_id);
+        idr_remove(&traceset_map, traceset_id);
         free_traceset(traceset);
     }
     else {
