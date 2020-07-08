@@ -110,22 +110,33 @@ void syscacct_tsk_pre_init(struct task_struct* tsk) {
 
 void syscacct_tsk_init(struct task_struct* tsk, int* syscalls, u32 amount) 
 {
+    // TODO: locking
     printk( KERN_DEBUG "SYSCACCT try init for task %d\n", tsk->pid);
-    tsk->syscalls_accounting.info = syscacct_init_alt(syscalls, amount);
+    tsk->syscalls_accounting.info = syscacct_init(syscalls, amount);
 }
 
 struct syscacct_entry* syscacct_tsk_find_entry(struct task_struct* tsk, int syscall_nr)
 {
-    // TODO: lock syscacct info
+    // TODO: locking
     struct hlist_head* acct_info = tsk->syscalls_accounting.info;
     if (acct_info == NULL) {
         return NULL;
     }
-    return syscacct_find_entry_alt(acct_info, syscall_nr);
+    return syscacct_find_entry(acct_info, syscall_nr);
 }
 
+void syscacct_tsk_deregister(struct task_struct* tsk)
+{
+    sysacct_free(tsk->syscalls_accounting.info);
+    tsk->syscalls_accounting.info = NULL;
+}
+
+/* call on task exit and target deregister */
 void syscacct_tsk_free(struct task_struct* tsk)
 {
-
+    // TODO: locking
+    if (tsk->syscalls_accounting.info != NULL) {
+        syscacct_tsk_deregister(tsk);
+    }
 }
 

@@ -1,12 +1,5 @@
 #include <linux/types.h>
 
-struct traceset_parameters {
-    __u32 amount_targets;
-    pid_t* targets;
-    __u32 amount_syscalls;
-    int* syscall_nrs;
-};
-
 struct traceset_data {
     int traceset_id;
     __u32 amount_targets;

@@ -731,6 +731,7 @@ void __put_task_struct(struct task_struct *tsk)
 	security_task_free(tsk);
 	exit_creds(tsk);
 	delayacct_tsk_free(tsk);
+    syscacct_tsk_free(tsk);
 	put_signal_struct(tsk->signal);
 
 	if (!profile_handoff_task(tsk))
@@ -2290,6 +2291,7 @@ bad_fork_cleanup_policy:
 bad_fork_cleanup_threadgroup_lock:
 #endif
 	delayacct_tsk_free(p);
+    syscacct_tsk_free(p);
 bad_fork_cleanup_count:
 	atomic_dec(&p->cred->user->processes);
 	exit_creds(p);
