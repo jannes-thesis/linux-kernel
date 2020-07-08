@@ -287,24 +287,24 @@ static int init_syscalls_array(struct traceset_info* traceset, int __user * sysc
 }
 
 // TODO: different errors for mem alloc failure and invalid user data
-static pid_t* copy_alloc_target_pids(pid_t __user * task_pids, int amount)
+static int copy_alloc_target_pids(pid_t __user * given_pids, int amount, pid_t* tracee_pids)
 {
     // copy pid array from user space
     unsigned long l = sizeof(pid_t) * amount;
-    pid_t* tracee_pids = kmalloc(l, GFP_KERNEL);
+    tracee_pids = kmalloc(l, GFP_KERNEL);
     if (!tracee_pids) {
         printk( KERN_DEBUG "TRACESET: could not allocate new tracee array\n");
-        return NULL;
+        return -ENOMEM;
     }
     printk( KERN_DEBUG "TRACESET: need to copy %lu bytes from user\n", l);
-    l = copy_from_user(tracee_pids, task_pids, sizeof(pid_t) * amount);
+    l = copy_from_user(tracee_pids, given_pids, sizeof(pid_t) * amount);
     if (l != 0) {
         printk( KERN_DEBUG "TRACESET: could not copy data from user\n");
         printk( KERN_DEBUG "TRACESET: %lu bytes not copied\n", l);
         kfree(tracee_pids);
-        return NULL;
+        return -EFAULT;
     }
-    return tracee_pids;
+    return 0;
 }
 
 static int get_traceset_data_fd(struct traceset_data* tdata)
@@ -332,7 +332,7 @@ static int get_traceset_data_fd(struct traceset_data* tdata)
 /* SYSCALLS */
 /*
  * register set of processes to be traced 
- * either pass existing traceset id or -1 to create a new traceset
+ * either pass existing traceset id, or negative int to create a new traceset
  *
  * return a file descriptor associated with traceset data,
  * needs to be mmapped in user space 
@@ -344,15 +344,15 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
                 int __user *, syscall_nrs, int, amount_syscalls)
 {
     int i;
-    int fd;
     struct traceset_info* traceset;
-    pid_t* tracee_pids;
-    bool is_new;
+    int ret = 0;
+    bool register_new = false;
+    pid_t* tracee_pids = NULL;
 
 
     spin_lock(&traceset_module_lock);
     if (traceset_id < 0) {
-        is_new = true;
+        register_new = true;
         /* init traceset and id, insert in traceset map */
         traceset = allocate_traceset(amount_syscalls);
         if (!traceset) {
@@ -379,23 +379,22 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         }
     }
     else {
-        is_new = false;
         traceset = idr_find(&traceset_map, traceset_id);
         if (!traceset) {
             printk( KERN_DEBUG "TRACESET: could not find traceset with id %d\n", traceset_id);
+            ret = -EFAULT;
             goto err;
         }
     }
 
     if (amount_targets > 0) {
         // copy pid array from user space
-        tracee_pids = copy_alloc_target_pids(task_pids, amount_targets);
-        if (!tracee_pids) {
+        ret = copy_alloc_target_pids(task_pids, amount_targets, tracee_pids);
+        if (ret < 0) {
             goto err;
         }
     }
 
-    // add targets to traceset
     // TODO: validate that all targets all children of caller (check if TGIDs are equal)
     //       use the pidhash map to find TGIDs fast
     for (i = 0; i < amount_targets; i++) {
@@ -404,15 +403,12 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         }
     }
 
-    if (is_new) {
-        fd = get_traceset_data_fd(traceset->data);
-        if (fd < 0) {
+    if (register_new) {
+        ret = get_traceset_data_fd(traceset->data);
+        if (ret < 0) {
             kfree(tracee_pids);
             goto err;
         }
-    }
-    else {
-        fd = 0;
     }
 
     // if worker was inactive, perform one traceset update and schedule worker
@@ -423,61 +419,63 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
     }
 
     spin_unlock(&traceset_module_lock);
-    return fd;
+    return ret;
 err:
-    if (is_new) {
+    if (register_new) {
         idr_remove(&traceset_map, traceset_id);
         free_traceset(traceset);
     }
     spin_unlock(&traceset_module_lock);
-    return -EFAULT;
-
+    return ret;
 }
 
 /*
  * deregister a set of processes from tracing for given traceset
  * if negative amount is passed, then whole traceset will be deregistered and is invalid after
  *
+ * on success:
  * return the amount of deregistered targets
  * guarantees that all passed deregister targets are not traced anymore
+ * on error:
+ * return error code, no targets have been deregistered
  */
 SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids, int, amount)
 {
     int i;
-    int deregister_amount = 0;
     pid_t* tracee_pids;
     struct traceset_info* traceset;
+    int ret = 0;
     spin_lock(&traceset_module_lock);
     traceset = idr_find(&traceset_map, traceset_id);
     if (!traceset) {
         printk( KERN_DEBUG "TRACESET: could not find traceset with id %d\n", traceset_id);
-        goto err;
+        ret = -EFAULT;
+        goto end;
     }
     if (amount <= 0) {
-        deregister_amount = traceset->data->amount_targets;
+        ret = traceset->data->amount_targets;
         idr_remove(&traceset_map, traceset_id);
         free_traceset(traceset);
     }
     else {
         // copy pid array from user space
-        tracee_pids = copy_alloc_target_pids(task_pids, amount);
-        if (!tracee_pids) {
-            goto err;
+        ret = copy_alloc_target_pids(task_pids, amount, tracee_pids);
+        if (ret < 0) {
+            goto end;
         }
         // remove targets from traceset
         for (i = 0; i < amount; i++) {
+            ret = 0;
             if (!remove_target(tracee_pids[i], traceset)) {
                 printk( KERN_DEBUG "TRACESET: removing target %d failed\n", tracee_pids[i]);
             }
             else {
-                deregister_amount++;
+                ret++;
             }
         }
     }
+end:
     spin_unlock(&traceset_module_lock);
-    return deregister_amount;
-err:
-    spin_unlock(&traceset_module_lock);
-    return -EFAULT;
+    return ret;
 }
 
