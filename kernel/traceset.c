@@ -80,6 +80,21 @@ static struct traceset_info* allocate_traceset(int amount_syscalls)
     return new_traceset;
 }
 
+/* free syscacct info for given target pid */
+static void free_target_syscacct(pid_t target_pid) 
+{
+    struct task_struct* target_task;
+    struct pid* pid_struct = find_get_pid(target_pid);
+    rcu_read_lock();
+    target_task = pid_task(pid_struct, PIDTYPE_PID);
+    if (target_task != NULL) {
+        syscacct_tsk_lock(target_task);
+        syscacct_tsk_deregister(target_task);
+        syscacct_tsk_unlock(target_task);
+    }
+    rcu_read_unlock();
+}
+
 /* traceset needs to be locked */
 static void free_traceset(struct traceset_info* traceset)
 {
@@ -94,6 +109,7 @@ static void free_traceset(struct traceset_info* traceset)
     // free tracees
     list_for_each_entry_safe(target_current, target_next, &traceset->tracees, list_node) {
         list_del(&target_current->list_node);
+        free_target_syscacct(target_current->task_pid);
         kfree(target_current);
     }
     kfree(traceset->syscall_nrs);
@@ -142,8 +158,6 @@ err:
 /* traceset needs to be locked */
 static bool remove_target(pid_t task_pid, struct traceset_info* traceset)
 {
-    struct task_struct* target_task;
-    struct pid* pid_struct;
     struct traceset_target* target_current;
     struct traceset_target* target_next;
     printk( KERN_DEBUG "TRACESET: remove target: %d\n", task_pid);
@@ -155,15 +169,7 @@ static bool remove_target(pid_t task_pid, struct traceset_info* traceset)
             kfree(target_current);
             traceset->data->amount_targets--;
             // deallocate target's syscacct info
-            pid_struct = find_get_pid(task_pid);
-	        rcu_read_lock();
-            target_task = pid_task(pid_struct, PIDTYPE_PID);
-            if (target_task != NULL) {
-                syscacct_tsk_lock(target_task);
-                syscacct_tsk_deregister(target_task);
-                syscacct_tsk_unlock(target_task);
-            }
-	        rcu_read_unlock();
+            free_target_syscacct(task_pid);
             return true;
         }
     }
@@ -175,6 +181,7 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
     struct syscacct_entry* syscall_data_entry;
     struct list_head* tracees = &traceset->tracees;
     struct traceset_target* target_cursor;
+    struct traceset_target* target_next;
     struct task_struct* task_cursor;
     struct pid* pid_struct_cursor;
     int i;
@@ -204,7 +211,7 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
 
     printk( KERN_DEBUG "TRACESET-WORKER: update traceset %d\n", id);
     // collect aggregated data for all targets
-    list_for_each_entry(target_cursor, tracees, list_node) {
+    list_for_each_entry_safe(target_cursor, target_next, tracees, list_node) {
         pid_struct_cursor = find_get_pid(target_cursor->task_pid);
         // need to read task fields in RCU critical section to avoid task_struct to become invalid
 	    rcu_read_lock();
@@ -213,6 +220,10 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
         if (task_cursor == NULL) {
 	        rcu_read_unlock();
             printk( KERN_DEBUG "TRACESET-WORKER: target task %d not found\n", target_cursor->task_pid);
+            // remove non-existing task from targets
+            list_del(&target_cursor->list_node);
+            kfree(target_cursor);
+            traceset->data->amount_targets--;
         }
         else {
             agg_read_bytes += task_cursor->ioac.read_bytes;
