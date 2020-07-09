@@ -13,6 +13,8 @@
 
 #include <uapi/linux/traceset.h>
 
+#define UPDATE_INTERVAL HZ / 10 
+
 static void work_handler(struct work_struct* work_arg);
 
 /* ==== statically allocated global data ==== */
@@ -78,6 +80,7 @@ static struct traceset_info* allocate_traceset(int amount_syscalls)
     return new_traceset;
 }
 
+/* traceset needs to be locked */
 static void free_traceset(struct traceset_info* traceset)
 {
     struct traceset_target* target_current;
@@ -90,7 +93,7 @@ static void free_traceset(struct traceset_info* traceset)
     __free_page(data_page);
     // free tracees
     list_for_each_entry_safe(target_current, target_next, &traceset->tracees, list_node) {
-        // TODO: need to also delete list entry?
+        list_del(&target_current->list_node);
         kfree(target_current);
     }
     kfree(traceset->syscall_nrs);
@@ -99,6 +102,7 @@ static void free_traceset(struct traceset_info* traceset)
 }
 
 /* fails if task is not found or is already target */
+/* traceset needs to be locked */
 static bool add_target(pid_t task_pid, struct traceset_info* traceset) 
 {
     struct task_struct* target_task;
@@ -113,18 +117,14 @@ static bool add_target(pid_t task_pid, struct traceset_info* traceset)
 	rcu_read_lock();
     target_task = pid_task(pid_struct, PIDTYPE_PID);
     if (target_task == NULL || target_task->syscalls_accounting.info != NULL) {
-	    rcu_read_unlock();
-        kfree(new_target);
         printk( KERN_DEBUG "TRACESET: target task %d not found or already a target, don't add as target\n", task_pid);
-        return false;
+        goto err;
     }
     syscacct_tsk_lock(target_task);
     if (!syscacct_tsk_register(target_task, traceset->syscall_nrs, traceset->amount_syscalls)) {
         syscacct_tsk_unlock(target_task);
-        rcu_read_unlock();
-        kfree(new_target);
         printk( KERN_DEBUG "TRACESET: target task %d syscall accounting could not be initalized\n", task_pid);
-        return false;
+        goto err;
     }
     syscacct_tsk_unlock(target_task);
     rcu_read_unlock();
@@ -133,20 +133,37 @@ static bool add_target(pid_t task_pid, struct traceset_info* traceset)
     list_add(&new_target->list_node, &traceset->tracees);
     traceset->data->amount_targets++;
     return true;
+err:
+    rcu_read_unlock();
+    kfree(new_target);
+    return false;
 }
 
+/* traceset needs to be locked */
 static bool remove_target(pid_t task_pid, struct traceset_info* traceset)
 {
+    struct task_struct* target_task;
+    struct pid* pid_struct;
     struct traceset_target* target_current;
     struct traceset_target* target_next;
     printk( KERN_DEBUG "TRACESET: remove target: %d\n", task_pid);
     list_for_each_entry_safe(target_current, target_next, &traceset->tracees, list_node) {
         if (target_current->task_pid == task_pid) {
             printk( KERN_DEBUG "TRACESET: found target to be removed: %d\n", task_pid);
+            // update traceset
             list_del(&target_current->list_node);
             kfree(target_current);
             traceset->data->amount_targets--;
-            // TODO: deallocate syscacct map of target task_struct
+            // deallocate target's syscacct info
+            pid_struct = find_get_pid(task_pid);
+	        rcu_read_lock();
+            target_task = pid_task(pid_struct, PIDTYPE_PID);
+            if (target_task != NULL) {
+                syscacct_tsk_lock(target_task);
+                syscacct_tsk_deregister(target_task);
+                syscacct_tsk_unlock(target_task);
+            }
+	        rcu_read_unlock();
             return true;
         }
     }
@@ -155,7 +172,6 @@ static bool remove_target(pid_t task_pid, struct traceset_info* traceset)
 
 static void update_traceset_data(int id, struct traceset_info* traceset)
 {
-    struct traceset_data* tp_data = traceset->data;
     struct syscacct_entry* syscall_data_entry;
     struct list_head* tracees = &traceset->tracees;
     struct traceset_target* target_cursor;
@@ -177,14 +193,17 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
         return;
     }
 
-    // TODO: handle kzalloc fail
     agg_counts = kzalloc(sizeof(u32) * traceset->amount_syscalls, GFP_KERNEL);
+    if (agg_counts == NULL) 
+        return;
     agg_times = kzalloc(sizeof(u64) * traceset->amount_syscalls, GFP_KERNEL);
+    if (agg_times == NULL) {
+        kfree(agg_counts);
+        return;
+    }
 
     printk( KERN_DEBUG "TRACESET-WORKER: update traceset %d\n", id);
-    tp_data->read_bytes = 0;
-    tp_data->write_bytes = 0;
-    
+    // collect aggregated data for all targets
     list_for_each_entry(target_cursor, tracees, list_node) {
         pid_struct_cursor = find_get_pid(target_cursor->task_pid);
         // need to read task fields in RCU critical section to avoid task_struct to become invalid
@@ -215,12 +234,15 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
         }
     }
 
+    // update traceset data
     for (i = 0; i < traceset->amount_syscalls; i++) {
         traceset->syscall_data[i].count = agg_counts[i];
         traceset->syscall_data[i].total_time = agg_times[i];
     }
     traceset->data->read_bytes = agg_read_bytes;
     traceset->data->write_bytes = agg_write_bytes;
+    kfree(agg_counts);
+    kfree(agg_times);
 }
 
 static int __update_traceset_data(int id, void* traceset, void* unused)
@@ -239,7 +261,8 @@ static void work_handler(struct work_struct* work_arg)
     }
     else {
         idr_for_each(&traceset_map, __update_traceset_data, NULL);
-        schedule_delayed_work(&update_work, 10 * HZ);
+        /* every 100ms */
+        schedule_delayed_work(&update_work, UPDATE_INTERVAL);
     }
     spin_unlock(&traceset_module_lock);
 }
@@ -261,10 +284,10 @@ static struct file_operations shared_data_fops =
 };
 
 
-// TODO: validation of syscall nr array
 /*
  * initalize the syscall nr array of given traceset
  * in case of failure syscall nr array will be NULL
+ * accepts invalid syscall numbers -> garbage entries that will never be accessed
  */
 static int init_syscalls_array(struct traceset_info* traceset, int __user * syscall_nrs, int amount)
 {
@@ -286,22 +309,22 @@ static int init_syscalls_array(struct traceset_info* traceset, int __user * sysc
     return 0;
 }
 
-// TODO: different errors for mem alloc failure and invalid user data
-static int copy_alloc_target_pids(pid_t __user * given_pids, int amount, pid_t* tracee_pids)
+/* copy target pids from user space to kernel space */
+static int copy_alloc_target_pids(pid_t __user * given_pids, int amount, pid_t** tracee_pids)
 {
     // copy pid array from user space
     unsigned long l = sizeof(pid_t) * amount;
-    tracee_pids = kmalloc(l, GFP_KERNEL);
-    if (!tracee_pids) {
+    *tracee_pids = kmalloc(l, GFP_KERNEL);
+    if (*tracee_pids == NULL) {
         printk( KERN_DEBUG "TRACESET: could not allocate new tracee array\n");
         return -ENOMEM;
     }
     printk( KERN_DEBUG "TRACESET: need to copy %lu bytes from user\n", l);
-    l = copy_from_user(tracee_pids, given_pids, sizeof(pid_t) * amount);
+    l = copy_from_user(*tracee_pids, given_pids, sizeof(pid_t) * amount);
     if (l != 0) {
         printk( KERN_DEBUG "TRACESET: could not copy data from user\n");
         printk( KERN_DEBUG "TRACESET: %lu bytes not copied\n", l);
-        kfree(tracee_pids);
+        kfree(*tracee_pids);
         return -EFAULT;
     }
     return 0;
@@ -329,7 +352,7 @@ static int get_traceset_data_fd(struct traceset_data* tdata)
     return fd;
 }
 
-/* SYSCALLS */
+/* ========= SYSCALLS ========= */
 /*
  * register set of processes to be traced 
  * either pass existing traceset id, or negative int to create a new traceset
@@ -389,7 +412,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
 
     if (amount_targets > 0) {
         // copy pid array from user space
-        ret = copy_alloc_target_pids(task_pids, amount_targets, tracee_pids);
+        ret = copy_alloc_target_pids(task_pids, amount_targets, &tracee_pids);
         if (ret < 0) {
             goto err;
         }
@@ -415,7 +438,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
     if (!worker_active) {
         worker_active = true;
         idr_for_each(&traceset_map, __update_traceset_data, NULL);
-        schedule_delayed_work(&update_work, 10 * HZ);
+        schedule_delayed_work(&update_work, UPDATE_INTERVAL);
     }
 
     spin_unlock(&traceset_module_lock);
@@ -459,7 +482,7 @@ SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids
     }
     else {
         // copy pid array from user space
-        ret = copy_alloc_target_pids(task_pids, amount, tracee_pids);
+        ret = copy_alloc_target_pids(task_pids, amount, &tracee_pids);
         if (ret < 0) {
             goto end;
         }
@@ -478,4 +501,3 @@ end:
     spin_unlock(&traceset_module_lock);
     return ret;
 }
-
