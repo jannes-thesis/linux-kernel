@@ -8,15 +8,6 @@
 #define SYSCALL_MAP_SIZE 8
 
 
-// TODO: think about synchronization 
-// ---- how to synchronize initialization ?
-// ---- could add extra spinlock field in task_struct
-// ---- OR single struct field with spinlock field and list_head field
-// TODO: think about deallocation
-// check static inline void delayacct_tsk_free(struct task_struct *tsk) callsites
-// to see how the delaycct struct is deallocated
-
-
 static int hash_syscall_nr(int syscall_nr) {
     return syscall_nr % SYSCALL_MAP_SIZE;
 }
@@ -36,40 +27,16 @@ static struct hlist_head* syscacct_init(int* syscalls, u32 amount)
     }
     for (i = 0; i < amount; i++) {
         entry = kzalloc(sizeof(struct syscacct_entry), GFP_KERNEL);
-        // TODO: handle alloc error
+        if (entry == NULL) {
+            syscacct_free(map);
+            return NULL;
+        }
         entry->syscall_nr = syscalls[i];
         hlist_add_head(&entry->node, &map[hash_syscall_nr(syscalls[i])]);
     }
     return map;
 }
 
-/* static struct hlist_head* syscacct_init_alt(int* syscalls, u32 amount) */
-/* { */
-/*     int i; */
-/*     struct hlist_head *list; */
-/*     struct syscacct_entry *entry; */
-
-/*     printk( KERN_DEBUG "SYSCACCT init\n"); */
-/*     list = kmalloc(sizeof(struct hlist_head), GFP_KERNEL); */
-/*     if (!list) { */
-/*         printk( KERN_DEBUG "SYSCACCT init fail: malloc failed\n"); */
-/*         return NULL; */
-/*     } */
-/* 	INIT_HLIST_HEAD(list); */
-/*     for (i = 0; i < amount; i++) { */
-/*         entry = kzalloc(sizeof(struct syscacct_entry), GFP_KERNEL); */
-/*         if (!entry) { */
-/*         // TODO: handle alloc error */
-/*             printk( KERN_DEBUG "SYSCACCT init fail: zalloc entry failed\n"); */
-/*         } */
-/*         else { */
-/*             entry->syscall_nr = syscalls[i]; */
-/*             hlist_add_head(&entry->node, list); */
-/*         } */
-/*     } */
-/*     printk( KERN_DEBUG "SYSCACCT init return\n"); */
-/*     return list; */
-/* } */
 
 static struct syscacct_entry* syscacct_find_entry(struct hlist_head *map, int syscall_nr)
 {
@@ -86,23 +53,17 @@ static struct syscacct_entry* syscacct_find_entry(struct hlist_head *map, int sy
     return NULL;
 }
 
-/* static struct syscacct_entry* syscacct_find_entry_alt(struct hlist_head* list, int syscall_nr) */
-/* { */
-/*     struct syscacct_entry *entry; */
-/*     printk( KERN_DEBUG "SYSCACCT trying to find entry for syscall nr %d\n", syscall_nr); */
-/*     hlist_for_each_entry(entry, list, node) { */
-/*         if (entry->syscall_nr == syscall_nr) { */
-/*             printk( KERN_DEBUG "SYSCACCT found entry for syscall nr %d\n", syscall_nr); */
-/*             return entry; */
-/*         } */
-/*     } */
-/*     printk( KERN_DEBUG "SYSCACCT did not find entry for syscall nr %d\n", syscall_nr); */
-/*     return NULL; */
-/* } */
-
 static void syscacct_free(struct hlist_head *map)
 {
-
+    struct syscacct_entry* current;
+    struct syscacct_entry* next;
+    for (i = 0; i < SYSCALL_MAP_SIZE; i++) {
+        hlist_for_each_entry_safe(current, next, &map[i], node) {
+            hlist_del(&current->node);
+            free(current);
+        }
+        free(&map[i]);
+    }
 }
 
 void syscacct_tsk_lock(struct task_struct* tsk) 
@@ -151,7 +112,6 @@ void syscacct_tsk_deregister(struct task_struct* tsk)
 }
 
 /* call on task exit */
-// TODO: locking needed at all here? (task is generally accessed with RCU locking)
 void syscacct_tsk_free(struct task_struct* tsk)
 {
     spin_lock(&tsk->syscalls_accounting.lock);

@@ -39,19 +39,21 @@ struct traceset_info {
     int amount_syscalls;
     int* syscall_nrs;
     /* always point this to same page and right behind traceset_data */
-    // TODO: check what maximum amount of tracked syscalls can fit in page
     struct traceset_syscall_data* syscall_data;
 };
 
 
-// TODO: fail if data shared with user does not fit in single page
 /*
  * allocate traceset with empty fields, amount syscall field set
+ * allow max of 8 system calls to be traced (arbitrary value, but guarantees all fits in page)
  */
 static struct traceset_info* allocate_traceset(int amount_syscalls) 
 {
     struct page* data_page;
     int i;
+    if (amount_syscalls > 8) {
+        return NULL;
+    }
     struct traceset_info* new_traceset = kmalloc(sizeof(struct traceset_info), GFP_KERNEL);
     if (!new_traceset) {
         return NULL;
@@ -101,7 +103,6 @@ static void free_traceset(struct traceset_info* traceset)
     struct traceset_target* target_current;
     struct traceset_target* target_next;
     struct page* data_page;
-    // TODO: verify no need to free pid struct?
     // free data and syscall data by unmapping and freeing data page
     data_page = virt_to_page((unsigned long) traceset->data);
     kunmap(data_page);
@@ -429,8 +430,9 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         }
     }
 
-    // TODO: validate that all targets all children of caller (check if TGIDs are equal)
-    //       use the pidhash map to find TGIDs fast
+    /* should validate all targets are children of caller (TGIDs equal to caller PID)
+     * [using the pidhash map the target TGIDs can be found fast]
+     * NOT IMPLEMENTED because it's easier to test with being able to trace any process */
     for (i = 0; i < amount_targets; i++) {
         if (!add_target(tracee_pids[i], traceset)) {
             printk( KERN_DEBUG "TRACESET: adding target to list failed\n");

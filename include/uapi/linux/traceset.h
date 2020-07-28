@@ -5,15 +5,10 @@ struct traceset_data {
     __u32 amount_targets;
     __u64 read_bytes;
     __u64 write_bytes;
-    // __u32 amount_syscalls; NOT NEEDEED
-    /* struct traceset_syscall_data syscalls_data[]; */
-    /* 
-     * c99 flexible arrary member notation, not supported in kernel (yet) 
-     * instead just put the array right behind traceset_data struct in the page
-     * size is known by caller (amount of system calls to do accounting for)
-     */
 };
 
+/* always in same page right behind traceset_data 
+ * same order as given by caller */
 struct traceset_syscall_data {
     __u32 count;
     __u64 total_time;
