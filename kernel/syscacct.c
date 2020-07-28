@@ -18,12 +18,17 @@ static void syscacct_free(struct hlist_head *map)
     struct hlist_node* next_entry;
     int i;
     for (i = 0; i < SYSCALL_MAP_SIZE; i++) {
+        printk( KERN_DEBUG "SYSCACCT freeing bucket's entries (bucket %d)\n", i);
+        current_entry = NULL;
+        next_entry = NULL;
         hlist_for_each_entry_safe(current_entry, next_entry, &map[i], node) {
+            printk( KERN_DEBUG "SYSCACCT deleting entry for syscall %d\n", current_entry->syscall_nr);
             hlist_del(&current_entry->node);
             kfree(current_entry);
         }
-        kfree(&map[i]);
     }
+    printk( KERN_DEBUG "SYSCACCT freeing bucket array\n");
+    kfree(map);
 }
 
 static struct hlist_head* syscacct_init(int* syscalls, u32 amount)

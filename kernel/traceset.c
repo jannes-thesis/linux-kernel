@@ -51,10 +51,11 @@ static struct traceset_info* allocate_traceset(int amount_syscalls)
 {
     struct page* data_page;
     int i;
+    struct traceset_info* new_traceset;
     if (amount_syscalls > 8) {
         return NULL;
     }
-    struct traceset_info* new_traceset = kmalloc(sizeof(struct traceset_info), GFP_KERNEL);
+    new_traceset = kmalloc(sizeof(struct traceset_info), GFP_KERNEL);
     if (!new_traceset) {
         return NULL;
     }
@@ -90,9 +91,7 @@ static void free_target_syscacct(pid_t target_pid)
     rcu_read_lock();
     target_task = pid_task(pid_struct, PIDTYPE_PID);
     if (target_task != NULL) {
-        syscacct_tsk_lock(target_task);
-        syscacct_tsk_deregister(target_task);
-        syscacct_tsk_unlock(target_task);
+        syscacct_tsk_free(target_task);
     }
     rcu_read_unlock();
 }
