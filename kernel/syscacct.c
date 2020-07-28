@@ -12,6 +12,20 @@ static int hash_syscall_nr(int syscall_nr) {
     return syscall_nr % SYSCALL_MAP_SIZE;
 }
 
+static void syscacct_free(struct hlist_head *map)
+{
+    struct syscacct_entry* current_entry;
+    struct hlist_node* next_entry;
+    int i;
+    for (i = 0; i < SYSCALL_MAP_SIZE; i++) {
+        hlist_for_each_entry_safe(current_entry, next_entry, &map[i], node) {
+            hlist_del(&current_entry->node);
+            kfree(current_entry);
+        }
+        kfree(&map[i]);
+    }
+}
+
 static struct hlist_head* syscacct_init(int* syscalls, u32 amount)
 {
     int i;
@@ -53,19 +67,6 @@ static struct syscacct_entry* syscacct_find_entry(struct hlist_head *map, int sy
     return NULL;
 }
 
-static void syscacct_free(struct hlist_head *map)
-{
-    struct syscacct_entry* current;
-    struct syscacct_entry* next;
-    for (i = 0; i < SYSCALL_MAP_SIZE; i++) {
-        hlist_for_each_entry_safe(current, next, &map[i], node) {
-            hlist_del(&current->node);
-            free(current);
-        }
-        free(&map[i]);
-    }
-}
-
 void syscacct_tsk_lock(struct task_struct* tsk) 
 {
     spin_lock(&tsk->syscalls_accounting.lock);
@@ -92,6 +93,10 @@ bool syscacct_tsk_register(struct task_struct* tsk, int* syscalls, u32 amount)
 {
     printk( KERN_DEBUG "SYSCACCT try init for task %d\n", tsk->pid);
     tsk->syscalls_accounting.info = syscacct_init(syscalls, amount);
+    if (tsk->syscalls_accounting.info == NULL) {
+        return false;
+    }
+    return true;
 }
 
 /* lock before calling */
