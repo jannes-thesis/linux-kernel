@@ -280,6 +280,7 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 	struct thread_info *ti;
     struct syscacct_entry* sacct_entry;
     u64 start;
+    u64 end;
 
 	enter_from_user_mode();
 	local_irq_enable();
@@ -298,16 +299,20 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
         if (current->syscalls_accounting.info != NULL) {
             syscacct_tsk_lock(current);
             sacct_entry = syscacct_tsk_find_entry(current, nr);
+            syscacct_tsk_unlock(current);
             if (sacct_entry != NULL) {
-                /* printk( KERN_DEBUG "SYSCACCT in common: account task %d: syscall %lu\n", current->pid, nr); */
                 start = ktime_get_ns();
 		        regs->ax = sys_call_table[nr](regs);
-                sacct_entry->syscall_delay += ktime_get_ns() - start;
-                sacct_entry->syscall_count++;
+                end = ktime_get_ns();
+                syscacct_tsk_lock(current);
+                sacct_entry = syscacct_tsk_find_entry(current, nr);
+                if (sacct_entry != NULL) {
+                    sacct_entry->syscall_delay += end - start;
+                    sacct_entry->syscall_count++;
+                }
                 syscacct_tsk_unlock(current);
             }
             else {
-                syscacct_tsk_unlock(current);
 		        regs->ax = sys_call_table[nr](regs);
             }
         }
