@@ -4,9 +4,9 @@
 #include <linux/highmem.h>
 #include <linux/list.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/spinlock.h>
 #include <linux/syscacct.h>
 #include <linux/syscalls.h>
 #include <linux/workqueue.h>
@@ -22,8 +22,8 @@ static void work_handler(struct work_struct* work_arg);
 DEFINE_IDR(traceset_map);
 /* whether update work is scheduled or not */
 bool worker_active = false;
-/* spinlock for traceset map and active worker var */
-DEFINE_SPINLOCK(traceset_module_lock);
+/* mutex for traceset map and active worker var */
+DEFINE_MUTEX(traceset_module_lock);
 /* wrapper for the worker function */
 DECLARE_DELAYED_WORK(update_work, work_handler);
 
@@ -265,7 +265,7 @@ static int __update_traceset_data(int id, void* traceset, void* unused)
 static void work_handler(struct work_struct* work_arg) 
 {
     printk( KERN_DEBUG "TRACESET-WORKER: start execution\n");
-    spin_lock(&traceset_module_lock);
+    mutex_lock(&traceset_module_lock);
     if (idr_is_empty(&traceset_map)) {
         printk( KERN_DEBUG "TRACESET-WORKER: 0 tracesets registered, stopping\n");
         worker_active = false;
@@ -275,7 +275,7 @@ static void work_handler(struct work_struct* work_arg)
         /* every 100ms */
         schedule_delayed_work(&update_work, UPDATE_INTERVAL);
     }
-    spin_unlock(&traceset_module_lock);
+    mutex_unlock(&traceset_module_lock);
 }
 
 /* SYSCALL HELPERS */
@@ -384,21 +384,21 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
     pid_t* tracee_pids = NULL;
 
 
-    spin_lock(&traceset_module_lock);
+    mutex_lock(&traceset_module_lock);
     if (traceset_id < 0) {
         register_new = true;
         /* init traceset and id, insert in traceset map */
         traceset = allocate_traceset(amount_syscalls);
         if (!traceset) {
             printk( KERN_DEBUG "TRACESET: could not allocate new traceset\n");
-            spin_unlock(&traceset_module_lock);
+            mutex_unlock(&traceset_module_lock);
             return -ENOMEM;
         }
         traceset_id = idr_alloc(&traceset_map, traceset, 0, 100, GFP_KERNEL);
         if (traceset_id < 0) {
             printk( KERN_DEBUG "TRACESET: could not insert new traceset in map\n");
             free_traceset(traceset);
-            spin_unlock(&traceset_module_lock);
+            mutex_unlock(&traceset_module_lock);
             return -EFAULT;
         }
         printk( KERN_DEBUG "TRACESET: inserted new traceset with id %d\n", traceset_id);
@@ -408,7 +408,7 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         i = init_syscalls_array(traceset, syscall_nrs, amount_syscalls);
         if (i != 0) {
             free_traceset(traceset);
-            spin_unlock(&traceset_module_lock);
+            mutex_unlock(&traceset_module_lock);
             return i;
         }
     }
@@ -453,14 +453,14 @@ SYSCALL_DEFINE5(traceset_register, int, traceset_id,
         schedule_delayed_work(&update_work, UPDATE_INTERVAL);
     }
 
-    spin_unlock(&traceset_module_lock);
+    mutex_unlock(&traceset_module_lock);
     return ret;
 err:
     if (register_new) {
         idr_remove(&traceset_map, traceset_id);
         free_traceset(traceset);
     }
-    spin_unlock(&traceset_module_lock);
+    mutex_unlock(&traceset_module_lock);
     return ret;
 }
 
@@ -480,7 +480,7 @@ SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids
     pid_t* tracee_pids;
     struct traceset_info* traceset;
     int ret = 0;
-    spin_lock(&traceset_module_lock);
+    mutex_lock(&traceset_module_lock);
     traceset = idr_find(&traceset_map, traceset_id);
     if (!traceset) {
         printk( KERN_DEBUG "TRACESET: could not find traceset with id %d\n", traceset_id);
@@ -510,6 +510,6 @@ SYSCALL_DEFINE3(traceset_deregister, int, traceset_id, pid_t __user *, task_pids
         }
     }
 end:
-    spin_unlock(&traceset_module_lock);
+    mutex_unlock(&traceset_module_lock);
     return ret;
 }
