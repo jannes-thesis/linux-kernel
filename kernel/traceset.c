@@ -1,4 +1,5 @@
 #include <linux/anon_inodes.h>
+#include <linux/delayacct.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/highmem.h>
@@ -188,6 +189,7 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
 
     u64 agg_read_bytes = 0;
     u64 agg_write_bytes = 0;
+    u64 agg_blkio = 0;
     u32* agg_counts;
     u64* agg_times;
 
@@ -228,6 +230,7 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
         else {
             agg_read_bytes += task_cursor->ioac.read_bytes;
             agg_write_bytes += task_cursor->ioac.write_bytes;
+            agg_blkio += task_cursor->delays->blkio_delay;
             syscacct_tsk_lock(task_cursor);
             for (i = 0; i < traceset->amount_syscalls; i++) {
                 syscall_data_entry = syscacct_tsk_find_entry(task_cursor, traceset->syscall_nrs[i]);
@@ -252,6 +255,7 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
     }
     traceset->data->read_bytes = agg_read_bytes;
     traceset->data->write_bytes = agg_write_bytes;
+    traceset->data->blkio_delay = agg_blkio;
     kfree(agg_counts);
     kfree(agg_times);
 }
