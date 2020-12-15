@@ -1,3 +1,4 @@
+#include <linux/spinlock_types.h>
 #include <linux/anon_inodes.h>
 #include <linux/delayacct.h>
 #include <linux/file.h>
