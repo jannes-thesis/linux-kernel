@@ -228,8 +228,8 @@ static void update_traceset_data(int id, struct traceset_info* traceset)
             traceset->data->amount_targets--;
         }
         else {
-            agg_read_bytes += task_cursor->ioac.read_bytes;
-            agg_write_bytes += task_cursor->ioac.write_bytes;
+            agg_read_bytes += task_cursor->ioac.rchar;
+            agg_write_bytes += task_cursor->ioac.wchar;
             agg_blkio += task_cursor->delays->blkio_delay;
             syscacct_tsk_lock(task_cursor);
             for (i = 0; i < traceset->amount_syscalls; i++) {
